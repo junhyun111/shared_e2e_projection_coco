@@ -1,8 +1,11 @@
+.git/
+.env
+.uv-cache/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 artifacts/
-hf-cache/
+torch-cache/
 *.pt
 *.csv

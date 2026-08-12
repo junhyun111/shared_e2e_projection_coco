@@ -1,4 +1,4 @@
-"""Standalone COCO trainer for the Shared-E2E representation projection model."""
+"""Official Deformable DETR reproduction with Shared-E2E ablations."""
 
 from .config import TrainConfig
 

@@ -27,6 +27,19 @@ class DistributedContext:
         if self.distributed:
             dist.barrier()
 
+    def all_true(self, value: bool) -> bool:
+        if not self.distributed:
+            return value
+        tensor = torch.tensor(int(value), device=self.device, dtype=torch.int32)
+        dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
+        return bool(tensor.item())
+
+    def window_box_normalizer(self, local_num_boxes: int) -> float:
+        tensor = torch.tensor(float(local_num_boxes), device=self.device)
+        if self.distributed:
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        return max(float(tensor.item()) / self.world_size, 1.0)
+
 
 def initialize_distributed(*, allow_cpu: bool = False) -> DistributedContext:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -36,7 +49,8 @@ def initialize_distributed(*, allow_cpu: bool = False) -> DistributedContext:
     if torch.cuda.is_available():
         if local_rank >= torch.cuda.device_count():
             raise RuntimeError(
-                f"LOCAL_RANK={local_rank}, but only {torch.cuda.device_count()} GPU(s) are visible"
+                f"LOCAL_RANK={local_rank}, but only "
+                f"{torch.cuda.device_count()} GPU(s) are visible"
             )
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
@@ -46,8 +60,8 @@ def initialize_distributed(*, allow_cpu: bool = False) -> DistributedContext:
         backend = "gloo"
     else:
         raise RuntimeError(
-            "CUDA is not available. Check Docker --gpus/NVIDIA Container Toolkit, "
-            "or pass --allow-cpu only for a smoke test."
+            "CUDA is not available. Check Docker GPU access or pass --allow-cpu "
+            "only for configuration tests."
         )
 
     if world_size > 1:
@@ -55,7 +69,6 @@ def initialize_distributed(*, allow_cpu: bool = False) -> DistributedContext:
             backend=backend,
             init_method="env://",
             timeout=timedelta(hours=6),
-            device_id=device if device.type == "cuda" else None,
         )
     return DistributedContext(rank, local_rank, world_size, device)
 
@@ -65,7 +78,9 @@ def cleanup_distributed(context: DistributedContext) -> None:
         dist.destroy_process_group()
 
 
-def reduce_sums(values: dict[str, float], context: DistributedContext) -> dict[str, float]:
+def reduce_sums(
+    values: dict[str, float], context: DistributedContext
+) -> dict[str, float]:
     if not context.distributed:
         return dict(values)
     keys = sorted(values)

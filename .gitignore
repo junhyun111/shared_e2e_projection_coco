@@ -1,0 +1,10 @@
+.env
+.uv-cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+artifacts/
+torch-cache/
+*.pt
+*.csv
