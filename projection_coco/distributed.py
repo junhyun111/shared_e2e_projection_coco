@@ -46,6 +46,14 @@ def initialize_distributed(*, allow_cpu: bool = False) -> DistributedContext:
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
 
+    local_world_size = int(
+        os.environ.get(
+            "LOCAL_WORLD_SIZE",
+            str(torch.cuda.device_count() if torch.cuda.is_available() else 1),
+        )
+    )
+    os.environ.setdefault("LOCAL_SIZE", str(local_world_size))
+
     if torch.cuda.is_available():
         if local_rank >= torch.cuda.device_count():
             raise RuntimeError(

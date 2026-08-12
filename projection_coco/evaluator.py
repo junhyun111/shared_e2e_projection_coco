@@ -8,6 +8,9 @@ from tqdm.auto import tqdm
 from .distributed import DistributedContext
 from .upstream import ensure_upstream_imports
 
+import io
+from contextlib import redirect_stdout
+
 
 ensure_upstream_imports()
 from datasets.coco_eval import CocoEvaluator  # noqa: E402
@@ -52,8 +55,13 @@ def evaluate_coco(
 
     evaluator.synchronize_between_processes()
     evaluator.accumulate()
+
     if context.is_main:
         evaluator.summarize()
+    else:
+        with redirect_stdout(io.StringIO()):
+            evaluator.summarize()
+
     stats = evaluator.coco_eval["bbox"].stats
     return {
         "map": float(stats[0]),
