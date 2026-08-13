@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--torch-cache", type=Path, default=os.environ.get("TORCH_HOME")
     )
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--target-global-batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--lr", type=float, default=2e-4)
@@ -59,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--save-every", type=int, default=5)
     parser.add_argument("--gradient-log-every", type=int, default=100)
+    parser.add_argument(
+        "--performance-log-every",
+        type=int,
+        default=0,
+        help="Synchronize and report data/optimizer-step timing every N steps (0 disables)",
+    )
     parser.add_argument(
         "--resume", default=None, help="Checkpoint path or 'auto' for latest.pt"
     )
@@ -104,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         eval_every=args.eval_every,
         save_every=args.save_every,
         gradient_log_every=args.gradient_log_every,
+        performance_log_every=args.performance_log_every,
         amp=args.amp,
         deterministic=args.deterministic,
         cache_mode=args.cache_mode,

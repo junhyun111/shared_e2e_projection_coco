@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import math
 import time
-from collections import Counter
 from contextlib import nullcontext
 from itertools import islice
 from pathlib import Path
@@ -19,7 +17,12 @@ from .checkpoint import (
 )
 from .config import TrainConfig, seed_everything
 from .criterion import weighted_detection_loss
-from .data import DataBundle, make_train_loader, make_val_loader
+from .data import (
+    DataBundle,
+    make_train_loader,
+    make_val_loader,
+    set_train_loader_epoch,
+)
 from .distributed import DistributedContext, reduce_sums
 from .evaluator import evaluate_coco
 from .initialization import ensure_detector_initialization
@@ -32,12 +35,15 @@ from .optimizer import make_optimizer
 
 
 def _full_windows(loader, size: int):
+    data_start = time.perf_counter()
     iterator = iter(loader)
     while True:
         window = list(islice(iterator, size))
+        data_seconds = time.perf_counter() - data_start
         if len(window) != size:
             return
-        yield window
+        yield window, data_seconds
+        data_start = time.perf_counter()
 
 
 def _move_targets(targets: list[dict], device: torch.device) -> list[dict]:
@@ -47,7 +53,7 @@ def _move_targets(targets: list[dict], device: torch.device) -> list[dict]:
     ]
 
 
-def _empty_epoch_sums() -> Counter:
+def _empty_epoch_sums(device: torch.device) -> dict[str, torch.Tensor]:
     keys = (
         "micro_batches",
         "optimizer_steps",
@@ -71,20 +77,30 @@ def _empty_epoch_sums() -> Counter:
         "cls_aux_cosine_raw",
         "projection_removed_ratio",
     )
-    return Counter({key: 0.0 for key in keys})
-
-
-def _projection_stats_default() -> dict[str, float | bool]:
     return {
-        "cls_aux_cosine_raw": math.nan,
-        "cls_aux_dot_raw": math.nan,
-        "cls_aux_dot_projected": math.nan,
-        "cls_grad_norm": math.nan,
-        "aux_grad_norm": math.nan,
-        "aux_grad_norm_projected": math.nan,
-        "projection_applied": False,
-        "projection_removed_ratio": math.nan,
+        key: torch.zeros((), device=device, dtype=torch.float64) for key in keys
     }
+
+
+def _add_epoch_sum(
+    sums: dict[str, torch.Tensor], key: str, value: torch.Tensor | float | int
+) -> None:
+    if isinstance(value, torch.Tensor):
+        sums[key].add_(value.detach().to(dtype=torch.float64))
+    else:
+        sums[key].add_(value)
+
+
+def _projection_stats_for_log(
+    stats: dict[str, torch.Tensor],
+) -> dict[str, float | bool]:
+    keys = tuple(stats)
+    values = torch.stack(
+        [stats[key].detach().to(dtype=torch.float64) for key in keys]
+    ).cpu().tolist()
+    logged = {key: float(value) for key, value in zip(keys, values)}
+    logged["projection_applied"] = bool(logged["projection_applied"])
+    return logged
 
 
 def _initial_history_row(config: TrainConfig, metrics: dict) -> dict:
@@ -159,6 +175,7 @@ def train(
             broadcast_buffers=False,
             find_unused_parameters=False,
         )
+    train_loader = make_train_loader(config, bundle, context)
     val_loader = make_val_loader(config, bundle, context)
 
     if context.is_main:
@@ -203,9 +220,7 @@ def train(
                 config.seed + context.rank + epoch * 100_003,
                 config.deterministic,
             )
-            train_loader = make_train_loader(
-                config, bundle, context, epoch=epoch
-            )
+            set_train_loader_epoch(train_loader, config, epoch)
             optimizer_steps_per_epoch = len(train_loader) // accumulation_steps
             dropped_micro_batches = len(train_loader) % accumulation_steps
             if optimizer_steps_per_epoch == 0:
@@ -215,7 +230,7 @@ def train(
 
             training_model.train()
             criterion.train()
-            sums = _empty_epoch_sums()
+            sums = _empty_epoch_sums(context.device)
             epoch_start = time.perf_counter()
             if context.device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(context.device)
@@ -231,7 +246,18 @@ def train(
             )
             micro_step = 0
             lr_used = optimizer.param_groups[0]["lr"]
-            for optimizer_step, window in enumerate(progress):
+            for optimizer_step, (window, data_seconds) in enumerate(progress):
+                log_performance = (
+                    context.is_main
+                    and config.performance_log_every > 0
+                    and optimizer_step % config.performance_log_every == 0
+                )
+                if log_performance and context.device.type == "cuda":
+                    torch.cuda.synchronize(context.device)
+                step_start = time.perf_counter() if log_performance else 0.0
+                window_finite = torch.ones(
+                    (), dtype=torch.bool, device=context.device
+                )
                 local_num_boxes = sum(
                     len(target["labels"])
                     for _, targets in window
@@ -248,9 +274,9 @@ def train(
                         if is_last_micro or not context.distributed
                         else training_model.no_sync()
                     )
-                    samples = samples.to(context.device)
+                    samples = samples.to(context.device, non_blocking=True)
                     targets = _move_targets(cpu_targets, context.device)
-                    projection_stats = _projection_stats_default()
+                    projection_stats = None
 
                     with sync_context:
                         with torch.cuda.amp.autocast(
@@ -279,12 +305,9 @@ def train(
                                     total_loss + config.aux_weight * result["aux_loss"]
                                 )
 
-                        finite_loss = bool(torch.isfinite(total_loss).item())
-                        if not context.all_true(finite_loss):
-                            raise FloatingPointError(
-                                f"Non-finite loss at epoch={epoch} "
-                                f"micro_step={micro_step}"
-                            )
+                        window_finite.logical_and_(
+                            torch.isfinite(total_loss.detach())
+                        )
 
                         correction_hook = None
                         if config.uses_projection:
@@ -311,33 +334,51 @@ def train(
                             if correction_hook is not None:
                                 correction_hook.remove()
 
-                    sums["micro_batches"] += 1
-                    sums["total_loss"] += float(total_loss.detach())
-                    sums["detector_loss"] += float(detector_loss.detach())
-                    sums["loss_ce"] += float(loss_dict["loss_ce"].detach())
-                    sums["loss_bbox"] += float(loss_dict["loss_bbox"].detach())
-                    sums["loss_giou"] += float(loss_dict["loss_giou"].detach())
-                    if config.uses_auxiliary:
-                        sums["aux_batches"] += 1
-                        sums["aux_loss"] += float(result["aux_loss"].detach())
-                        sums["aux_l1"] += float(result["aux_l1"].detach())
-                        sums["aux_giou"] += float(result["aux_giou"].detach())
-                        sums["total_objects"] += result["aux_total"]
-                        sums["used_objects"] += result["aux_used"]
-                        sums["collision_targets"] += result["aux_collisions"]
-                        for key, value in result["feature_stats"].items():
-                            sums[key] += value
+                    with torch.no_grad():
+                        _add_epoch_sum(sums, "micro_batches", 1)
+                        _add_epoch_sum(sums, "total_loss", total_loss)
+                        _add_epoch_sum(sums, "detector_loss", detector_loss)
+                        _add_epoch_sum(sums, "loss_ce", loss_dict["loss_ce"])
+                        _add_epoch_sum(sums, "loss_bbox", loss_dict["loss_bbox"])
+                        _add_epoch_sum(sums, "loss_giou", loss_dict["loss_giou"])
+                        if config.uses_auxiliary:
+                            _add_epoch_sum(sums, "aux_batches", 1)
+                            _add_epoch_sum(sums, "aux_loss", result["aux_loss"])
+                            _add_epoch_sum(sums, "aux_l1", result["aux_l1"])
+                            _add_epoch_sum(sums, "aux_giou", result["aux_giou"])
+                            _add_epoch_sum(
+                                sums, "total_objects", result["aux_total"]
+                            )
+                            _add_epoch_sum(
+                                sums, "used_objects", result["aux_used"]
+                            )
+                            _add_epoch_sum(
+                                sums,
+                                "collision_targets",
+                                result["aux_collisions"],
+                            )
+                            for key, value in result["feature_stats"].items():
+                                _add_epoch_sum(sums, key, value)
+                        if config.uses_projection:
+                            if projection_stats is None:
+                                raise RuntimeError("Missing projection statistics")
+                            _add_epoch_sum(sums, "projection_steps", 1)
+                            _add_epoch_sum(
+                                sums,
+                                "projection_applied",
+                                projection_stats["projection_applied"],
+                            )
+                            _add_epoch_sum(
+                                sums,
+                                "cls_aux_cosine_raw",
+                                projection_stats["cls_aux_cosine_raw"],
+                            )
+                            _add_epoch_sum(
+                                sums,
+                                "projection_removed_ratio",
+                                projection_stats["projection_removed_ratio"],
+                            )
                     if config.uses_projection:
-                        sums["projection_steps"] += 1
-                        sums["projection_applied"] += int(
-                            projection_stats["projection_applied"]
-                        )
-                        sums["cls_aux_cosine_raw"] += projection_stats[
-                            "cls_aux_cosine_raw"
-                        ]
-                        sums["projection_removed_ratio"] += projection_stats[
-                            "projection_removed_ratio"
-                        ]
                         if (
                             context.is_main
                             and micro_step % config.gradient_log_every == 0
@@ -350,7 +391,7 @@ def train(
                                     "optimizer_step": optimizer_step,
                                     "micro_step": micro_step,
                                     "rank": context.rank,
-                                    **projection_stats,
+                                    **_projection_stats_for_log(projection_stats),
                                     "aux_weight": config.aux_weight,
                                     "grad_scale": scaler.get_scale(),
                                 }
@@ -361,21 +402,33 @@ def train(
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     base_model.parameters(), config.grad_clip
                 )
-                finite_gradient = bool(torch.isfinite(grad_norm).item())
-                if not context.all_true(finite_gradient):
+                window_finite.logical_and_(torch.isfinite(grad_norm.detach()))
+                if not context.all_true(window_finite):
                     raise FloatingPointError(
-                        f"Non-finite gradient norm at epoch={epoch} "
+                        f"Non-finite loss or gradient at epoch={epoch} "
                         f"step={optimizer_step}"
                     )
                 scaler.step(optimizer)
                 scaler.update()
                 skipped = bool(config.amp and scaler.get_scale() < scale_before)
-                sums["optimizer_steps"] += 1
-                sums["optimizer_steps_skipped"] += int(skipped)
+                with torch.no_grad():
+                    _add_epoch_sum(sums, "optimizer_steps", 1)
+                    _add_epoch_sum(sums, "optimizer_steps_skipped", int(skipped))
+                if log_performance:
+                    if context.device.type == "cuda":
+                        torch.cuda.synchronize(context.device)
+                    step_seconds = time.perf_counter() - step_start
+                    print(
+                        f"[perf] epoch={epoch} step={optimizer_step + 1} "
+                        f"data_wait={data_seconds:.3f}s "
+                        f"compute={step_seconds:.3f}s"
+                    )
 
+            if context.device.type == "cuda":
+                torch.cuda.synchronize(context.device)
             epoch_seconds = time.perf_counter() - epoch_start
             elapsed_train += epoch_seconds
-            global_sums = reduce_sums(dict(sums), context)
+            global_sums = reduce_sums(sums, context)
             scheduler.step()
 
             metrics = {

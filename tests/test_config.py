@@ -19,10 +19,23 @@ def test_accumulation_steps_resolve_reported_batch(tmp_path):
     assert config.accumulation_steps(world_size=2) == 8
 
 
+def test_default_batch_matches_two_gpu_training_recipe(tmp_path):
+    config = make_config(tmp_path)
+    assert config.batch_size == 4
+    assert config.accumulation_steps(world_size=2) == 4
+
+
 def test_accumulation_requires_exact_divisibility(tmp_path):
     config = make_config(tmp_path, batch_size=3, target_global_batch_size=32)
     with pytest.raises(ValueError, match="not divisible"):
         config.accumulation_steps(world_size=2)
+
+
+def test_performance_logging_is_diagnostic_not_recipe(tmp_path):
+    regular = make_config(tmp_path)
+    profiled = make_config(tmp_path, performance_log_every=100)
+
+    assert regular.recipe_fingerprint == profiled.recipe_fingerprint
 
 
 @pytest.mark.parametrize(
@@ -48,4 +61,3 @@ def test_methods_share_detector_recipe(tmp_path):
     projected = make_config(tmp_path, method="projected")
     assert baseline.detector_recipe_fingerprint == projected.detector_recipe_fingerprint
     assert baseline.recipe_fingerprint != projected.recipe_fingerprint
-

@@ -61,8 +61,6 @@ def make_train_loader(
     config: TrainConfig,
     bundle: DataBundle,
     context: DistributedContext,
-    *,
-    epoch: int,
 ):
     if context.distributed:
         sampler = DistributedSampler(
@@ -73,26 +71,42 @@ def make_train_loader(
             seed=config.seed,
             drop_last=False,
         )
-        sampler.set_epoch(epoch)
     else:
         sampler = RandomSampler(
             bundle.train_dataset,
-            generator=torch.Generator().manual_seed(config.seed + epoch * 100_003),
+            generator=torch.Generator().manual_seed(config.seed),
         )
-    generator = torch.Generator().manual_seed(
-        config.seed + context.rank + epoch * 100_003
-    )
-    return DataLoader(
-        bundle.train_dataset,
-        batch_size=config.batch_size,
-        sampler=sampler,
-        drop_last=True,
-        collate_fn=collate_fn,
-        num_workers=config.num_workers,
-        pin_memory=context.device.type == "cuda",
-        worker_init_fn=_seed_worker,
-        generator=generator,
-    )
+    generator = torch.Generator().manual_seed(config.seed + context.rank)
+    loader_options = {
+        "dataset": bundle.train_dataset,
+        "batch_size": config.batch_size,
+        "sampler": sampler,
+        "drop_last": True,
+        "collate_fn": collate_fn,
+        "num_workers": config.num_workers,
+        "pin_memory": context.device.type == "cuda",
+        "worker_init_fn": _seed_worker,
+        "generator": generator,
+    }
+    if config.num_workers > 0:
+        loader_options.update(
+            persistent_workers=True,
+            prefetch_factor=4,
+        )
+    return DataLoader(**loader_options)
+
+
+def set_train_loader_epoch(
+    loader: DataLoader, config: TrainConfig, epoch: int
+) -> None:
+    sampler = loader.sampler
+    if isinstance(sampler, DistributedSampler):
+        sampler.set_epoch(epoch)
+        return
+    if isinstance(sampler, RandomSampler):
+        if sampler.generator is None:
+            sampler.generator = torch.Generator()
+        sampler.generator.manual_seed(config.seed + epoch * 100_003)
 
 
 def make_val_loader(
@@ -108,13 +122,19 @@ def make_val_loader(
         )
     else:
         sampler = SequentialSampler(bundle.val_dataset)
-    return DataLoader(
-        bundle.val_dataset,
-        batch_size=config.batch_size,
-        sampler=sampler,
-        drop_last=False,
-        collate_fn=collate_fn,
-        num_workers=config.num_workers,
-        pin_memory=context.device.type == "cuda",
-        worker_init_fn=_seed_worker,
-    )
+    loader_options = {
+        "dataset": bundle.val_dataset,
+        "batch_size": config.batch_size,
+        "sampler": sampler,
+        "drop_last": False,
+        "collate_fn": collate_fn,
+        "num_workers": config.num_workers,
+        "pin_memory": context.device.type == "cuda",
+        "worker_init_fn": _seed_worker,
+    }
+    if config.num_workers > 0:
+        loader_options.update(
+            persistent_workers=True,
+            prefetch_factor=4,
+        )
+    return DataLoader(**loader_options)

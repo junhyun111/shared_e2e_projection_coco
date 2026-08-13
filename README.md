@@ -35,11 +35,11 @@ adapter, GT sampling, auxiliary loss, gradient hook이 생성되지 않습니다
 - official COCO random resize/crop augmentation
 - FP32 by default
 
-2 GPUs, GPU당 micro-batch 2라면 accumulation은 자동으로 다음과 같이
+2 GPUs, GPU당 micro-batch 4라면 accumulation은 자동으로 다음과 같이
 계산됩니다.
 
 ```text
-2 images/GPU * 2 GPUs * 8 micro-steps = 32 images/update
+4 images/GPU * 2 GPUs * 4 micro-steps = 32 images/update
 ```
 
 Detection loss와 제안 방법의 auxiliary loss는 모두 accumulation window 전체의
@@ -95,7 +95,7 @@ docker run --rm \
     --data-root /workspace/data/coco \
     --output-root /workspace/artifacts \
     --torch-cache /workspace/torch-cache \
-    --batch-size 2 \
+    --batch-size 4 \
     --target-global-batch-size 32 \
     --train-limit 32 \
     --val-limit 16 \
@@ -103,7 +103,7 @@ docker run --rm \
     --num-workers 2
 ```
 
-로그에서 `world_size=2`, `gradient_accumulation_steps=8`,
+로그에서 `world_size=2`, `gradient_accumulation_steps=4`,
 `effective_global_batch_size=32`를 확인합니다.
 
 ## 본 실험
@@ -124,7 +124,7 @@ docker run --rm \
     --data-root /workspace/data/coco \
     --output-root /workspace/artifacts \
     --torch-cache /workspace/torch-cache \
-    --batch-size 2 \
+    --batch-size 4 \
     --target-global-batch-size 32 \
     --num-workers 8 \
     --seed 42 \
@@ -133,6 +133,11 @@ docker run --rm \
 
 동일한 명령에서 `--method aux_only` 또는 `--method projected`만 바꿉니다.
 `scripts/`의 세 실행 파일도 같은 환경변수를 사용합니다.
+
+입력 대기와 GPU 계산 시간을 진단할 때만 `--performance-log-every 100`을
+추가합니다. 이 옵션은 지정한 optimizer step에서 CUDA synchronization을
+수행하므로 평상시에는 기본값 `0`으로 둡니다. 실행 스크립트와 Compose에서는
+`PERFORMANCE_LOG_EVERY=100`으로 같은 진단을 켤 수 있습니다.
 
 ## Docker Compose
 

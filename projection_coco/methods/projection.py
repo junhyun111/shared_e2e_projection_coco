@@ -15,29 +15,27 @@ def project_conflicting_gradient(
     classification_norm = classification_norm_squared.sqrt()
     auxiliary_norm = auxiliary_float.square().sum().sqrt()
     cosine = dot / (classification_norm * auxiliary_norm + epsilon)
-    applied = bool((dot < 0).item())
-    if applied:
-        coefficient = dot / (classification_norm_squared + epsilon)
-        projected = auxiliary_gradient - coefficient.to(
-            auxiliary_gradient.dtype
-        ) * classification_gradient
-    else:
-        projected = auxiliary_gradient
+    applied = dot < 0
+    coefficient = dot / (classification_norm_squared + epsilon)
+    conflicting_projection = auxiliary_gradient - coefficient.to(
+        auxiliary_gradient.dtype
+    ) * classification_gradient
+    projected = torch.where(applied, conflicting_projection, auxiliary_gradient)
     projected_float = projected.detach().float()
     projected_norm = projected_float.square().sum().sqrt()
     projected_dot = (classification_float * projected_float).sum()
-    removed_ratio = (
-        0.0
-        if float(auxiliary_norm) <= epsilon
-        else float(1.0 - projected_norm / auxiliary_norm)
+    removed_ratio = torch.where(
+        auxiliary_norm <= epsilon,
+        torch.zeros_like(auxiliary_norm),
+        1.0 - projected_norm / auxiliary_norm.clamp_min(epsilon),
     )
     return projected, {
-        "cls_aux_cosine_raw": float(cosine),
-        "cls_aux_dot_raw": float(dot),
-        "cls_aux_dot_projected": float(projected_dot),
-        "cls_grad_norm": float(classification_norm),
-        "aux_grad_norm": float(auxiliary_norm),
-        "aux_grad_norm_projected": float(projected_norm),
+        "cls_aux_cosine_raw": cosine,
+        "cls_aux_dot_raw": dot,
+        "cls_aux_dot_projected": projected_dot,
+        "cls_grad_norm": classification_norm,
+        "aux_grad_norm": auxiliary_norm,
+        "aux_grad_norm_projected": projected_norm,
         "projection_applied": applied,
         "projection_removed_ratio": removed_ratio,
     }
@@ -69,8 +67,6 @@ def register_representation_gradient_correction(
     auxiliary_weight: float,
     grad_scale: float,
 ):
-    if projected_auxiliary_gradient is raw_auxiliary_gradient:
-        return None
     correction = (
         (projected_auxiliary_gradient - raw_auxiliary_gradient).detach()
         * float(auxiliary_weight)

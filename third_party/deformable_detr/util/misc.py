@@ -349,6 +349,11 @@ class NestedTensor(object):
         self.tensors = tensors
         self.mask = mask
 
+    def pin_memory(self):
+        pinned_tensor = self.tensors.pin_memory()
+        pinned_mask = self.mask.pin_memory() if self.mask is not None else None
+        return NestedTensor(pinned_tensor, pinned_mask)
+
     def to(self, device, non_blocking=False):
         # type: (Device) -> NestedTensor # noqa
         cast_tensor = self.tensors.to(device, non_blocking=non_blocking)

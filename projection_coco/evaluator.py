@@ -35,7 +35,7 @@ def evaluate_coco(
         mininterval=0.5,
     )
     for samples, targets in iterator:
-        samples = samples.to(context.device)
+        samples = samples.to(context.device, non_blocking=True)
         device_targets = [
             {key: value.to(context.device) for key, value in target.items()}
             for target in targets
@@ -73,4 +73,3 @@ def evaluate_coco(
         "mar100": float(stats[8]),
         "val_seconds": time.perf_counter() - start,
     }
-

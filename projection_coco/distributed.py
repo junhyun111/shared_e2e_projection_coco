@@ -27,11 +27,15 @@ class DistributedContext:
         if self.distributed:
             dist.barrier()
 
-    def all_true(self, value: bool) -> bool:
-        if not self.distributed:
-            return value
-        tensor = torch.tensor(int(value), device=self.device, dtype=torch.int32)
-        dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
+    def all_true(self, value: bool | torch.Tensor) -> bool:
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                raise ValueError("all_true expects a scalar tensor")
+            tensor = value.detach().to(device=self.device, dtype=torch.int32)
+        else:
+            tensor = torch.tensor(int(value), device=self.device, dtype=torch.int32)
+        if self.distributed:
+            dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
         return bool(tensor.item())
 
     def window_box_normalizer(self, local_num_boxes: int) -> float:
@@ -87,13 +91,12 @@ def cleanup_distributed(context: DistributedContext) -> None:
 
 
 def reduce_sums(
-    values: dict[str, float], context: DistributedContext
+    values: dict[str, torch.Tensor], context: DistributedContext
 ) -> dict[str, float]:
-    if not context.distributed:
-        return dict(values)
     keys = sorted(values)
-    tensor = torch.tensor(
-        [values[key] for key in keys], dtype=torch.float64, device=context.device
-    )
-    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    if not keys:
+        return {}
+    tensor = torch.stack([values[key] for key in keys])
+    if context.distributed:
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     return {key: float(value) for key, value in zip(keys, tensor.cpu().tolist())}

@@ -12,5 +12,5 @@
 The vendored source also contains notices for code derived from DETR and other
 projects. Those source headers and notices are preserved in place. The vendored
 `util/misc.py` contains a version-parsing compatibility fix for torchvision
-versions with two-digit minor numbers; it does not change model or training
-semantics.
+versions with two-digit minor numbers and `NestedTensor` pinned-memory/non-blocking
+transfer helpers. These changes do not alter model semantics.

@@ -222,12 +222,8 @@ class AuxiliaryModel(nn.Module):
             "giou": loss_giou,
             "selected": selected,
             "stats": {
-                "raw_feature_norm": float(
-                    raw_features.detach().norm(dim=-1).mean()
-                ),
-                "adapted_feature_norm": float(
-                    adapted.detach().norm(dim=-1).mean()
-                ),
+                "raw_feature_norm": raw_features.detach().norm(dim=-1).mean(),
+                "adapted_feature_norm": adapted.detach().norm(dim=-1).mean(),
             },
         }
 

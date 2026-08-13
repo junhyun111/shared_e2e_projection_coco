@@ -28,7 +28,7 @@ class TrainConfig:
     output_root: Path
     method: Method = "baseline"
     epochs: int = 50
-    batch_size: int = 2
+    batch_size: int = 4
     target_global_batch_size: int = 32
     num_workers: int = 8
     lr: float = 2e-4
@@ -46,6 +46,7 @@ class TrainConfig:
     eval_every: int = 1
     save_every: int = 5
     gradient_log_every: int = 100
+    performance_log_every: int = 0
     amp: bool = False
     deterministic: bool = False
     cache_mode: bool = False
@@ -104,6 +105,8 @@ class TrainConfig:
             raise ValueError(f"These settings must be positive: {', '.join(invalid)}")
         if self.num_workers < 0:
             raise ValueError("num_workers must be non-negative")
+        if self.performance_log_every < 0:
+            raise ValueError("performance_log_every must be non-negative")
         if self.weight_decay < 0:
             raise ValueError("weight_decay must be non-negative")
         if self.uses_auxiliary and self.aux_weight <= 0:
@@ -189,6 +192,7 @@ class TrainConfig:
             "eval_every",
             "save_every",
             "gradient_log_every",
+            "performance_log_every",
             "skip_initial_eval",
         ):
             values.pop(key, None)

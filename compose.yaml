@@ -37,11 +37,13 @@ services:
       - --epochs
       - ${EPOCHS:-50}
       - --batch-size
-      - ${BATCH_SIZE:-2}
+      - ${BATCH_SIZE:-4}
       - --target-global-batch-size
       - ${TARGET_GLOBAL_BATCH_SIZE:-32}
       - --num-workers
       - ${NUM_WORKERS:-8}
+      - --performance-log-every
+      - ${PERFORMANCE_LOG_EVERY:-0}
       - --seed
       - ${SEED:-42}
       - --resume
