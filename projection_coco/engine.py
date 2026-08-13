@@ -194,6 +194,11 @@ def train(
             )
         if resume_path is not None:
             print(f"[resume] {resume_path} -> epoch {start_epoch}")
+            if config.num_workers > 0:
+                print(
+                    "[warning] Persistent DataLoader worker RNG is not stored in "
+                    "checkpoints; resumed random augmentations are not bit-exact."
+                )
 
     if resume_path is None and not config.skip_initial_eval:
         metrics = evaluate_coco(

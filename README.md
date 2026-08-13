@@ -183,8 +183,13 @@ artifacts/
 
 `--resume auto`는 해당 method/seed의 `latest.pt`를 찾습니다. 재시작 시
 method, recipe fingerprint, official upstream commit, detector initialization
-fingerprint, world size를 검사하고 optimizer, scheduler, scaler, RNG 상태까지
-복원합니다.
+fingerprint, world size를 검사하고 optimizer, scheduler, scaler와 main process의
+Python/NumPy/Torch/CUDA RNG 상태를 복원합니다.
+
+`num_workers > 0`에서는 처리량을 위해 DataLoader worker를 epoch 사이에
+유지합니다. Worker별 Python/NumPy RNG 상태는 checkpoint에 저장되지 않으므로
+resume 후 `DistributedSampler`의 데이터 순서는 같지만 random resize/crop/flip은
+중단 없이 실행한 경우와 bit-exact하게 같지 않습니다.
 
 AMP는 official FP32 recipe와 다른 실험이므로 기본값은 꺼져 있습니다.
 `--amp`는 CUDA operator 호환성을 별도로 검증한 경우에만 사용합니다.

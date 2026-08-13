@@ -8,6 +8,21 @@ from ..config import TrainConfig, seed_everything
 from .geometry import cxcywh_to_xyxy, generalized_box_iou, inverse_sigmoid
 
 
+def _stable_group_argmin(
+    group_ids: torch.Tensor, values: torch.Tensor
+) -> torch.Tensor:
+    """Return the first minimum-value index for each group, in input order."""
+    if group_ids.numel() == 0:
+        return group_ids.new_empty((0,))
+    distance_order = torch.argsort(values, stable=True)
+    group_order = torch.argsort(group_ids[distance_order], stable=True)
+    ordered_indices = distance_order[group_order]
+    ordered_groups = group_ids[ordered_indices]
+    first_in_group = torch.ones_like(ordered_groups, dtype=torch.bool)
+    first_in_group[1:] = ordered_groups[1:] != ordered_groups[:-1]
+    return ordered_indices[first_in_group].sort().values
+
+
 class ResidualPatchAdapter(nn.Module):
     def __init__(self, dim: int) -> None:
         super().__init__()
@@ -96,94 +111,92 @@ class AuxiliaryModel(nn.Module):
             "padding_mask": inputs[5],
         }
 
-    def _valid_level_layout(self, batch_index: int):
+    def _level_layout(self):
         cache = self._encoder_cache
+        memory = cache["memory"]
         level = self.feature_level
-        full_height, full_width = [
-            int(value) for value in cache["spatial_shapes"][level].tolist()
-        ]
-        start = int(cache["level_start_index"][level].item())
-        padding_mask = cache["padding_mask"][
-            batch_index, start : start + full_height * full_width
-        ].reshape(full_height, full_width)
-        valid_mask = ~padding_mask
-        valid_height = int(valid_mask.any(dim=1).sum().item())
-        valid_width = int(valid_mask.any(dim=0).sum().item())
-        if valid_height <= 0 or valid_width <= 0:
-            raise RuntimeError("Empty valid feature region")
-        return start, full_width, valid_height, valid_width
+        full_height, full_width = cache["spatial_shapes"][level].unbind()
+        start = cache["level_start_index"][level]
+        level_size = full_height * full_width
+
+        positions = torch.arange(
+            memory.shape[1], device=memory.device, dtype=torch.long
+        )
+        level_offsets = positions - start
+        in_level = (level_offsets >= 0) & (level_offsets < level_size)
+        level_rows = torch.div(
+            level_offsets, full_width, rounding_mode="floor"
+        )
+        level_columns = torch.remainder(level_offsets, full_width)
+        valid = (~cache["padding_mask"]) & in_level.unsqueeze(0)
+        # NestedTensor padding is bottom/right-only, so the largest valid
+        # coordinate plus one is the valid height/width for each image.
+        valid_heights = (
+            torch.where(valid, level_rows.unsqueeze(0), -1).amax(dim=1) + 1
+        )
+        valid_widths = (
+            torch.where(valid, level_columns.unsqueeze(0), -1).amax(dim=1) + 1
+        )
+        return start, full_width, valid_heights, valid_widths
 
     def select_aux_samples(self, targets: list[dict]) -> dict:
         memory = self.encoder_representation
-        features = []
-        references = []
-        target_boxes = []
-        total = 0
-        collisions = 0
-
-        for batch_index, target in enumerate(targets):
-            boxes = target["boxes"]
-            object_count = len(boxes)
-            total += object_count
-            if object_count == 0:
-                continue
-            start, full_width, valid_height, valid_width = self._valid_level_layout(
-                batch_index
-            )
-            centers = boxes[:, :2].clamp(min=0.0, max=1.0 - 1e-7)
-            columns = torch.floor(centers[:, 0] * valid_width).long().clamp(
-                0, valid_width - 1
-            )
-            rows = torch.floor(centers[:, 1] * valid_height).long().clamp(
-                0, valid_height - 1
-            )
-            cells = rows * valid_width + columns
-            keep = torch.zeros(object_count, dtype=torch.bool, device=boxes.device)
-            for cell in cells.unique():
-                indices = torch.where(cells == cell)[0]
-                cell_row = torch.div(cell, valid_width, rounding_mode="floor")
-                cell_column = cell % valid_width
-                cell_center = boxes.new_tensor(
-                    [
-                        (float(cell_column.item()) + 0.5) / valid_width,
-                        (float(cell_row.item()) + 0.5) / valid_height,
-                    ]
-                )
-                distances = (centers[indices] - cell_center).square().sum(dim=-1)
-                keep[indices[distances.argmin()]] = True
-
-            kept_indices = torch.where(keep)[0]
-            collisions += object_count - int(kept_indices.numel())
-            for object_index in kept_indices.tolist():
-                row = int(rows[object_index])
-                column = int(columns[object_index])
-                flat_index = start + row * full_width + column
-                features.append(memory[batch_index, flat_index])
-                references.append(
-                    memory.new_tensor(
-                        [
-                            (column + 0.5) / valid_width,
-                            (row + 0.5) / valid_height,
-                        ]
-                    )
-                )
-                target_boxes.append(boxes[object_index])
-
-        if not features:
+        if len(targets) != memory.shape[0]:
+            raise ValueError("Target count must match the encoder batch size")
+        object_counts = [target["boxes"].shape[0] for target in targets]
+        total = sum(object_counts)
+        if total == 0:
             empty = memory.new_empty
             return {
                 "features": empty((0, memory.shape[-1])),
                 "references": empty((0, 2)),
                 "targets": empty((0, 4)),
-                "total": total,
-                "collisions": collisions,
+                "total": 0,
+                "collisions": 0,
             }
+
+        boxes = torch.cat([target["boxes"] for target in targets], dim=0)
+        batch_indices = torch.repeat_interleave(
+            torch.arange(len(targets), device=memory.device),
+            torch.tensor(object_counts, device=memory.device),
+            output_size=total,
+        )
+        start, full_width, valid_heights, valid_widths = self._level_layout()
+        object_heights = valid_heights[batch_indices]
+        object_widths = valid_widths[batch_indices]
+        centers = boxes[:, :2].clamp(min=0.0, max=1.0 - 1e-7)
+        columns = torch.floor(
+            centers[:, 0] * object_widths.to(dtype=centers.dtype)
+        ).long()
+        rows = torch.floor(
+            centers[:, 1] * object_heights.to(dtype=centers.dtype)
+        ).long()
+        columns = torch.minimum(columns.clamp_min(0), object_widths - 1)
+        rows = torch.minimum(rows.clamp_min(0), object_heights - 1)
+
+        flat_indices = start + rows * full_width + columns
+        reference_dtype = boxes.dtype
+        cell_centers = torch.stack(
+            (
+                (columns.to(reference_dtype) + 0.5)
+                / object_widths.to(reference_dtype),
+                (rows.to(reference_dtype) + 0.5)
+                / object_heights.to(reference_dtype),
+            ),
+            dim=-1,
+        )
+        distances = (centers - cell_centers).square().sum(dim=-1)
+        group_ids = batch_indices * memory.shape[1] + flat_indices
+        kept_indices = _stable_group_argmin(group_ids, distances)
+        kept_batches = batch_indices[kept_indices]
+        kept_flat_indices = flat_indices[kept_indices]
+
         return {
-            "features": torch.stack(features),
-            "references": torch.stack(references),
-            "targets": torch.stack(target_boxes),
+            "features": memory[kept_batches, kept_flat_indices],
+            "references": cell_centers[kept_indices].to(dtype=memory.dtype),
+            "targets": boxes[kept_indices],
             "total": total,
-            "collisions": collisions,
+            "collisions": total - kept_indices.numel(),
         }
 
     def auxiliary_loss(self, targets: list[dict], normalizer: float) -> dict:
