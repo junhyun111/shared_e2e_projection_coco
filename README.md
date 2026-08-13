@@ -166,6 +166,37 @@ docker run --rm \
 평가는 모든 rank가 COCO validation을 나눠 수행하고 official
 `pycocotools.COCOeval` 결과를 병합합니다.
 
+### 공식 체크포인트 재현 평가
+
+프로젝트 루트의 `r50_deformable_detr-checkpoint.pth`를 COCO 2017
+`val2017` 전체 5,000장에 평가하려면 서버에서 다음을 실행합니다. 스크립트는
+`.env`의 `COCO_ROOT`, `OUTPUT_ROOT`, `GPU_IDS`, `NPROC_PER_NODE`를 읽습니다.
+
+```bash
+bash scripts/evaluate_official.sh
+```
+
+Docker Compose에서는 다음 한 명령으로 같은 평가를 실행합니다. `evaluation`
+profile을 사용하므로 일반 `docker compose up` 학습에는 영향을 주지 않습니다.
+
+```bash
+docker compose --profile evaluation run --rm --build evaluate-official
+```
+
+평가는 공식 multi-scale R50, one-stage, 300 queries, box refinement 없음 설정과
+official `pycocotools.COCOeval` bbox 방식으로 수행됩니다. 산출물은 `.env`의
+`OUTPUT_ROOT` 아래에 생성됩니다.
+
+```text
+official_checkpoint_eval/
+├── coco_official_metrics.json
+└── coco_official_metrics.png
+```
+
+PNG와 JSON에는 AP/AP50/AP75/APS/APM/APL 및 여섯 AR 지표, 공식 배포 로그의
+epoch 49 기준값, 실제 평가값과 기준값의 차이가 기록됩니다. 공식 기준 AP는
+44.5106이며 AP 차이가 0.5 point 이내인지도 표시합니다.
+
 ## 산출물과 재시작
 
 ```text
@@ -200,7 +231,7 @@ Docker 이미지 안에서 다음을 실행합니다.
 
 ```bash
 python -m pytest -q
-python -m compileall -q train.py evaluate.py projection_coco tests
+python -m compileall -q train.py evaluate.py evaluate_official.py projection_coco tests
 ```
 
 Vendored 코드는 [Apache License 2.0](third_party/deformable_detr/LICENSE)을

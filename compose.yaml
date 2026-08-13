@@ -19,7 +19,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              device_ids: ["8", "9"]
               capabilities: [gpu]
     command:
       - torchrun
@@ -48,3 +48,45 @@ services:
       - ${SEED:-42}
       - --resume
       - ${RESUME:-auto}
+
+  evaluate-official:
+    profiles:
+      - evaluation
+    build:
+      context: .
+      args:
+        PYTORCH_IMAGE: ${PYTORCH_IMAGE:-pytorch/pytorch:2.1.2-cuda12.1-cudnn8-devel}
+        TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-8.9}
+    image: shared-e2e-deformable-detr:latest
+    shm_size: 32gb
+    environment:
+      TORCH_HOME: /workspace/torch-cache
+      NVIDIA_VISIBLE_DEVICES: ${GPU_IDS:-all}
+    volumes:
+      - ${COCO_ROOT:?Set COCO_ROOT}:/workspace/data/coco:ro
+      - ${OUTPUT_ROOT:-./artifacts}:/workspace/artifacts
+      - ${TORCH_CACHE:-./torch-cache}:/workspace/torch-cache
+      - ${OFFICIAL_CHECKPOINT:-./r50_deformable_detr-checkpoint.pth}:/workspace/shared_e2e_projection_coco/r50_deformable_detr-checkpoint.pth:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command:
+      - torchrun
+      - --standalone
+      - --nproc_per_node=${NPROC_PER_NODE:-2}
+      - evaluate_official.py
+      - /workspace/shared_e2e_projection_coco/r50_deformable_detr-checkpoint.pth
+      - --data-root
+      - /workspace/data/coco
+      - --output-dir
+      - /workspace/artifacts/official_checkpoint_eval
+      - --torch-cache
+      - /workspace/torch-cache
+      - --batch-size
+      - ${EVAL_BATCH_SIZE:-4}
+      - --num-workers
+      - ${NUM_WORKERS:-8}

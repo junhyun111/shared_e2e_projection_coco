@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 
 from projection_coco.config import TrainConfig, configure_torch_cache
-from projection_coco.data import make_val_loader, prepare_data
+from projection_coco.data import make_val_loader, prepare_val_data
 from projection_coco.detector import build_official_components
 from projection_coco.distributed import cleanup_distributed, initialize_distributed
 from projection_coco.evaluator import evaluate_coco
@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_torch_cache(args.torch_cache)
     context = initialize_distributed(allow_cpu=args.allow_cpu)
     try:
-        bundle = prepare_data(config, context)
+        bundle = prepare_val_data(config, context)
         detector, _, postprocessors = build_official_components(
             config, context.device, pretrained_backbone=False
         )

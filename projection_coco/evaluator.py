@@ -70,6 +70,11 @@ def evaluate_coco(
         "map_small": float(stats[3]),
         "map_medium": float(stats[4]),
         "map_large": float(stats[5]),
+        "mar1": float(stats[6]),
+        "mar10": float(stats[7]),
         "mar100": float(stats[8]),
+        "mar_small": float(stats[9]),
+        "mar_medium": float(stats[10]),
+        "mar_large": float(stats[11]),
         "val_seconds": time.perf_counter() - start,
     }

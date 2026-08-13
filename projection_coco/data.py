@@ -25,6 +25,12 @@ class DataBundle:
     coco_api: object
 
 
+@dataclass(frozen=True)
+class ValidationBundle:
+    val_dataset: torch.utils.data.Dataset
+    coco_api: object
+
+
 def _deterministic_subset(dataset, limit: int | None, seed: int):
     if limit is None or limit >= len(dataset):
         return dataset
@@ -43,18 +49,30 @@ def _seed_worker(worker_id: int) -> None:
     random.seed(worker_seed)
 
 
-def prepare_data(config: TrainConfig, context: DistributedContext) -> DataBundle:
+def prepare_val_data(
+    config: TrainConfig, context: DistributedContext
+) -> ValidationBundle:
     args = config.official_args(context.device)
-    train_dataset = build_dataset("train", args)
     val_dataset = build_dataset("val", args)
     coco_api = get_coco_api_from_dataset(val_dataset)
-    train_dataset = _deterministic_subset(
-        train_dataset, config.train_limit, config.seed
-    )
     val_dataset = _deterministic_subset(
         val_dataset, config.val_limit, config.seed + 1
     )
-    return DataBundle(train_dataset, val_dataset, coco_api)
+    return ValidationBundle(val_dataset=val_dataset, coco_api=coco_api)
+
+
+def prepare_data(config: TrainConfig, context: DistributedContext) -> DataBundle:
+    args = config.official_args(context.device)
+    train_dataset = build_dataset("train", args)
+    validation = prepare_val_data(config, context)
+    train_dataset = _deterministic_subset(
+        train_dataset, config.train_limit, config.seed
+    )
+    return DataBundle(
+        train_dataset,
+        validation.val_dataset,
+        validation.coco_api,
+    )
 
 
 def make_train_loader(
@@ -110,7 +128,9 @@ def set_train_loader_epoch(
 
 
 def make_val_loader(
-    config: TrainConfig, bundle: DataBundle, context: DistributedContext
+    config: TrainConfig,
+    bundle: DataBundle | ValidationBundle,
+    context: DistributedContext,
 ):
     if context.distributed:
         sampler = DistributedSampler(

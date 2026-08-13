@@ -9,7 +9,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential libglib2.0-0 libgl1 patch \
+        build-essential fonts-dejavu-core libglib2.0-0 libgl1 patch \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/shared_e2e_projection_coco
@@ -23,7 +23,7 @@ RUN cd third_party/deformable_detr \
     && FORCE_CUDA=1 python -m pip install --no-build-isolation ./models/ops
 
 COPY projection_coco ./projection_coco
-COPY train.py evaluate.py ./
+COPY train.py evaluate.py evaluate_official.py ./
 COPY tests ./tests
 COPY scripts ./scripts
 RUN chmod +x scripts/*.sh
