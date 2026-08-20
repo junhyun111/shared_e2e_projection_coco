@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from projection_coco.config import (
     AMP_DTYPES,
+    BATCH_RECIPE_GLOBAL_BATCH,
+    BATCH_RECIPES,
     DEFAULT_AUX_WEIGHT,
     METHODS,
     TrainConfig,
@@ -18,6 +21,16 @@ from projection_coco.engine import train
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
+
+
+def _optional_environment_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a floating-point number") from error
 
 
 def optional_positive_int(value: str) -> int | None:
@@ -47,13 +60,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--target-global-batch-size", type=int, default=32)
+    parser.add_argument("--target-global-batch-size", type=int, default=None)
+    parser.add_argument(
+        "--batch-recipe",
+        choices=BATCH_RECIPES,
+        default=os.environ.get("BATCH_RECIPE") or None,
+        help="Named global-batch recipe; explicit target batch must agree",
+    )
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--backbone-lr", type=float, default=2e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-clip", type=float, default=0.1)
-    parser.add_argument("--aux-weight", type=float, default=DEFAULT_AUX_WEIGHT)
+    parser.add_argument(
+        "--aux-weight",
+        type=float,
+        default=_optional_environment_float("AUX_WEIGHT", DEFAULT_AUX_WEIGHT),
+    )
     parser.add_argument("--feature-level", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train-limit", type=optional_positive_int, default=None)
@@ -119,27 +142,54 @@ def _resolve_precision(args, parser: argparse.ArgumentParser) -> tuple[bool, str
     return bool(args.amp), args.amp_dtype
 
 
-def _resolve_run_name(args, *, amp: bool, amp_dtype: str) -> str | None:
-    if args.run_name is not None:
-        return args.run_name
-    if amp or args.batch_size != 4 or args.target_global_batch_size != 32:
-        precision = (
-            {"float16": "fp16", "bfloat16": "bf16"}[amp_dtype]
-            if amp
-            else "fp32"
-        )
-        return (
-            f"{precision}_batch{args.batch_size}_global"
-            f"{args.target_global_batch_size}"
-        )
-    return None
+def _resolve_batch_recipe(
+    args, parser: argparse.ArgumentParser
+) -> tuple[str, int]:
+    recipe = args.batch_recipe
+    target = args.target_global_batch_size
+    if recipe is None:
+        target = 32 if target is None else target
+        recipe = {
+            16: "coco_gb16_reference",
+            32: "coco_gb32_optimized",
+        }.get(target, "custom")
+        return recipe, target
+    expected = BATCH_RECIPE_GLOBAL_BATCH.get(recipe)
+    if expected is not None:
+        target = expected if target is None else target
+        if target != expected:
+            parser.error(
+                f"--batch-recipe {recipe} requires "
+                f"--target-global-batch-size {expected}"
+            )
+        return recipe, target
+    if target is None:
+        parser.error("--batch-recipe custom requires --target-global-batch-size")
+    return recipe, target
+
+
+def _automatic_run_name(config: TrainConfig) -> str:
+    recipe_tag = {
+        "coco_gb16_reference": "gb16_reference",
+        "coco_gb32_optimized": "gb32_optimized",
+        "custom": f"gb{config.target_global_batch_size}_custom",
+    }[config.batch_recipe]
+    precision = {
+        "float32": "fp32",
+        "float16": "fp16",
+        "bfloat16": "bf16",
+    }[config.precision]
+    return (
+        f"{recipe_tag}_{precision}_b{config.batch_size}_"
+        f"{config.recipe_fingerprint[:8]}"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     amp, amp_dtype = _resolve_precision(args, parser)
-    run_name = _resolve_run_name(args, amp=amp, amp_dtype=amp_dtype)
+    batch_recipe, target_global_batch_size = _resolve_batch_recipe(args, parser)
     configure_torch_cache(args.torch_cache)
     config = TrainConfig(
         data_root=args.data_root,
@@ -147,7 +197,8 @@ def main(argv: list[str] | None = None) -> int:
         method=args.method,
         epochs=args.epochs,
         batch_size=args.batch_size,
-        target_global_batch_size=args.target_global_batch_size,
+        target_global_batch_size=target_global_batch_size,
+        batch_recipe=batch_recipe,
         num_workers=args.num_workers,
         lr=args.lr,
         backbone_lr=args.backbone_lr,
@@ -167,8 +218,15 @@ def main(argv: list[str] | None = None) -> int:
         deterministic=args.deterministic,
         cache_mode=args.cache_mode,
         skip_initial_eval=args.skip_initial_eval,
-        run_name=run_name,
+        run_name=args.run_name,
     )
+    if config.run_name is None:
+        legacy_auto_resume = (
+            str(args.resume).lower() == "auto"
+            and config.latest_checkpoint.is_file()
+        )
+        if not legacy_auto_resume:
+            config = replace(config, run_name=_automatic_run_name(config))
     context = initialize_distributed(allow_cpu=args.allow_cpu)
     try:
         bundle = prepare_data(config, context)

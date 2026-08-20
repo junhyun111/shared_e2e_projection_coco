@@ -22,7 +22,27 @@ def test_accumulation_steps_resolve_reported_batch(tmp_path):
 def test_default_batch_matches_two_gpu_training_recipe(tmp_path):
     config = make_config(tmp_path)
     assert config.batch_size == 4
+    assert config.batch_recipe == "coco_gb32_optimized"
     assert config.accumulation_steps(world_size=2) == 4
+
+
+def test_gb16_reference_uses_two_accumulation_steps_on_two_gpus(tmp_path):
+    config = make_config(
+        tmp_path,
+        batch_recipe="coco_gb16_reference",
+        target_global_batch_size=16,
+    )
+
+    assert config.accumulation_steps(world_size=2) == 2
+
+
+def test_named_batch_recipe_rejects_mismatched_global_batch(tmp_path):
+    with pytest.raises(ValueError, match="requires target_global_batch_size=16"):
+        make_config(
+            tmp_path,
+            batch_recipe="coco_gb16_reference",
+            target_global_batch_size=32,
+        )
 
 
 def test_accumulation_requires_exact_divisibility(tmp_path):
@@ -63,6 +83,45 @@ def test_run_name_isolates_outputs_without_changing_recipe(tmp_path):
 
     assert isolated.run_dir == regular.run_dir / "fp16_batch4_global32"
     assert isolated.recipe_fingerprint == regular.recipe_fingerprint
+
+
+def test_baseline_recipe_ignores_inactive_auxiliary_settings(tmp_path):
+    first = make_config(tmp_path, method="baseline", aux_weight=2.0, feature_level=0)
+    second = make_config(tmp_path, method="baseline", aux_weight=2.5, feature_level=1)
+
+    assert first.recipe_fingerprint == second.recipe_fingerprint
+
+
+def test_auxiliary_recipe_includes_aux_weight(tmp_path):
+    first = make_config(tmp_path, method="projected", aux_weight=2.0)
+    second = make_config(tmp_path, method="projected", aux_weight=2.5)
+
+    assert first.recipe_fingerprint != second.recipe_fingerprint
+
+
+def test_comparison_fingerprint_matches_across_methods(tmp_path):
+    baseline = make_config(tmp_path, method="baseline")
+    auxiliary = make_config(tmp_path, method="aux_only")
+    projected = make_config(tmp_path, method="projected")
+
+    assert baseline.comparison_fingerprint == auxiliary.comparison_fingerprint
+    assert auxiliary.comparison_fingerprint == projected.comparison_fingerprint
+
+
+def test_old_config_infers_named_batch_recipe(tmp_path):
+    values = make_config(tmp_path).as_dict()
+    values.pop("batch_recipe")
+
+    restored = TrainConfig.from_dict(values)
+
+    assert restored.batch_recipe == "coco_gb32_optimized"
+
+
+def test_projection_definition_is_explicit(tmp_path):
+    config = make_config(tmp_path, method="projected")
+
+    assert config.projection_scope == "per_rank_micro_batch_encoder_representation"
+    assert config.projection_reference_loss == "final_decoder_loss_ce"
 
 
 @pytest.mark.parametrize("run_name", ["../escape", "has space", "", "-leading"])

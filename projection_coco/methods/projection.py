@@ -43,6 +43,11 @@ def project_conflicting_gradient(
 
 
 def representation_projected_gradients(model, loss_dict: dict, result: dict):
+    """Project GT-center auxiliary gradients against final-decoder CE.
+
+    This is evaluated on each rank and micro-batch at the captured encoder
+    representation. Parameter gradients are synchronized later by DDP.
+    """
     if "loss_ce" not in loss_dict:
         raise KeyError("Projection requires final-decoder loss_ce")
     if result["aux_loss"] is None:

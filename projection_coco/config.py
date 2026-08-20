@@ -16,6 +16,11 @@ import torch
 
 Method = Literal["baseline", "aux_only", "projected", "aux_no_adapter"]
 AmpDType = Literal["float16", "bfloat16"]
+BatchRecipe = Literal[
+    "coco_gb16_reference",
+    "coco_gb32_optimized",
+    "custom",
+]
 METHODS: tuple[Method, ...] = (
     "baseline",
     "aux_only",
@@ -23,6 +28,15 @@ METHODS: tuple[Method, ...] = (
     "aux_no_adapter",
 )
 AMP_DTYPES: tuple[AmpDType, ...] = ("float16", "bfloat16")
+BATCH_RECIPES: tuple[BatchRecipe, ...] = (
+    "coco_gb16_reference",
+    "coco_gb32_optimized",
+    "custom",
+)
+BATCH_RECIPE_GLOBAL_BATCH = {
+    "coco_gb16_reference": 16,
+    "coco_gb32_optimized": 32,
+}
 DEFAULT_AUX_WEIGHT = 2.5
 
 
@@ -34,6 +48,7 @@ class TrainConfig:
     epochs: int = 50
     batch_size: int = 4
     target_global_batch_size: int = 32
+    batch_recipe: BatchRecipe = "coco_gb32_optimized"
     num_workers: int = 8
     lr: float = 2e-4
     backbone_lr: float = 2e-5
@@ -117,6 +132,19 @@ class TrainConfig:
             raise ValueError(
                 f"amp_dtype must be one of {', '.join(AMP_DTYPES)}"
             )
+        if self.batch_recipe not in BATCH_RECIPES:
+            raise ValueError(
+                f"batch_recipe must be one of {', '.join(BATCH_RECIPES)}"
+            )
+        expected_global_batch = BATCH_RECIPE_GLOBAL_BATCH.get(self.batch_recipe)
+        if (
+            expected_global_batch is not None
+            and self.target_global_batch_size != expected_global_batch
+        ):
+            raise ValueError(
+                f"{self.batch_recipe} requires target_global_batch_size="
+                f"{expected_global_batch}, got {self.target_global_batch_size}"
+            )
         if self.run_name is not None and not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9._-]*", self.run_name
         ):
@@ -164,6 +192,31 @@ class TrainConfig:
     @property
     def uses_grad_scaler(self) -> bool:
         return self.amp and self.amp_dtype == "float16"
+
+    @property
+    def projection_scope(self) -> str | None:
+        return (
+            "per_rank_micro_batch_encoder_representation"
+            if self.uses_projection
+            else None
+        )
+
+    @property
+    def projection_reference_loss(self) -> str | None:
+        return "final_decoder_loss_ce" if self.uses_projection else None
+
+    @property
+    def method_definition(self) -> dict:
+        return {
+            "method": self.method,
+            "projection_scope": self.projection_scope,
+            "projection_reference_loss": self.projection_reference_loss,
+            "projected_gradient": (
+                "gt_center_auxiliary_localization"
+                if self.uses_projection
+                else None
+            ),
+        }
 
     def accumulation_steps(self, world_size: int) -> int:
         micro_global_batch = self.batch_size * world_size
@@ -231,6 +284,17 @@ class TrainConfig:
         # effect when autocast is disabled.
         if not values["amp"]:
             values.pop("amp_dtype", None)
+        # Method-inactive settings must not invalidate a baseline checkpoint.
+        if not self.uses_auxiliary:
+            values.pop("aux_weight", None)
+            values.pop("feature_level", None)
+        return values
+
+    def comparison_dict(self) -> dict:
+        """Settings that must match across a paper comparison matrix."""
+        values = self.recipe_dict()
+        for key in ("method", "aux_weight", "feature_level"):
+            values.pop(key, None)
         return values
 
     def detector_recipe_dict(self) -> dict:
@@ -267,6 +331,11 @@ class TrainConfig:
         payload = json.dumps(self.recipe_dict(), sort_keys=True).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()[:16]
 
+    @property
+    def comparison_fingerprint(self) -> str:
+        payload = json.dumps(self.comparison_dict(), sort_keys=True).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()[:16]
+
     def to_json(self, world_size: int | None = None) -> str:
         values = self.as_dict()
         if world_size is not None:
@@ -278,6 +347,8 @@ class TrainConfig:
                 self.batch_size * world_size * accumulation
             )
         values["recipe_fingerprint"] = self.recipe_fingerprint
+        values["comparison_fingerprint"] = self.comparison_fingerprint
+        values["method_definition"] = self.method_definition
         return json.dumps(values, indent=2, ensure_ascii=False)
 
     @classmethod
@@ -285,6 +356,12 @@ class TrainConfig:
         allowed = {field.name for field in fields(cls)}
         filtered = {key: value for key, value in values.items() if key in allowed}
         filtered.update(overrides)
+        if "batch_recipe" not in values and "batch_recipe" not in overrides:
+            target = int(filtered.get("target_global_batch_size", 32))
+            filtered["batch_recipe"] = {
+                16: "coco_gb16_reference",
+                32: "coco_gb32_optimized",
+            }.get(target, "custom")
         return cls(**filtered)
 
     def official_args(self, device: torch.device | str) -> SimpleNamespace:

@@ -54,6 +54,17 @@ def _float_detection_outputs(value):
     return value
 
 
+def _stats_are_finite(stats: dict[str, torch.Tensor]) -> torch.Tensor:
+    finite = [
+        torch.isfinite(value.detach().float()).all()
+        for value in stats.values()
+        if isinstance(value, torch.Tensor) and value.is_floating_point()
+    ]
+    if not finite:
+        raise RuntimeError("Projection statistics contain no floating-point values")
+    return torch.stack(finite).all()
+
+
 def _full_windows(loader, size: int):
     data_start = time.perf_counter()
     iterator = iter(loader)
@@ -127,6 +138,14 @@ def _initial_history_row(config: TrainConfig, metrics: dict) -> dict:
     return {
         "method": config.method,
         "seed": config.seed,
+        "batch_recipe": config.batch_recipe,
+        "precision": config.precision,
+        "batch_size_per_gpu": config.batch_size,
+        "target_global_batch_size": config.target_global_batch_size,
+        "recipe_fingerprint": config.recipe_fingerprint,
+        "comparison_fingerprint": config.comparison_fingerprint,
+        "projection_scope": config.projection_scope,
+        "projection_reference_loss": config.projection_reference_loss,
         "epoch": 0,
         "total_loss": np.nan,
         "detector_loss": np.nan,
@@ -158,6 +177,20 @@ def train(
     *,
     resume_from: str | Path | None = None,
 ) -> None:
+    existing_outputs = config.latest_checkpoint.is_file() or config.history_path.is_file()
+    if resume_from is None and existing_outputs:
+        raise FileExistsError(
+            f"Run output already exists at {config.run_dir}; use --resume auto or "
+            "choose a different --run-name"
+        )
+    if (
+        str(resume_from).lower() == "auto"
+        and not config.latest_checkpoint.is_file()
+        and config.history_path.is_file()
+    ):
+        raise FileNotFoundError(
+            f"History exists but latest checkpoint is missing at {config.run_dir}"
+        )
     config.create_output_dirs()
     accumulation_steps = config.accumulation_steps(context.world_size)
     detector, criterion, postprocessors, initialization_fingerprint = (
@@ -348,6 +381,9 @@ def train(
                             ) = representation_projected_gradients(
                                 base_model, loss_dict, result
                             )
+                            window_finite.logical_and_(
+                                _stats_are_finite(projection_stats)
+                            )
                             correction_hook = (
                                 register_representation_gradient_correction(
                                     representation,
@@ -420,6 +456,13 @@ def train(
                                     "optimizer_step": optimizer_step,
                                     "micro_step": micro_step,
                                     "rank": context.rank,
+                                    "batch_recipe": config.batch_recipe,
+                                    "precision": config.precision,
+                                    "recipe_fingerprint": config.recipe_fingerprint,
+                                    "projection_scope": config.projection_scope,
+                                    "projection_reference_loss": (
+                                        config.projection_reference_loss
+                                    ),
                                     **_projection_stats_for_log(projection_stats),
                                     "aux_weight": config.aux_weight,
                                     "grad_scale": scaler.get_scale(),
@@ -434,7 +477,7 @@ def train(
                 window_finite.logical_and_(torch.isfinite(grad_norm.detach()))
                 if not context.all_true(window_finite):
                     raise FloatingPointError(
-                        f"Non-finite loss or gradient at epoch={epoch} "
+                        f"Non-finite loss, projection statistic, or gradient at epoch={epoch} "
                         f"step={optimizer_step}"
                     )
                 scaler.step(optimizer)
@@ -488,6 +531,14 @@ def train(
                 row = {
                     "method": config.method,
                     "seed": config.seed,
+                    "batch_recipe": config.batch_recipe,
+                    "precision": config.precision,
+                    "batch_size_per_gpu": config.batch_size,
+                    "target_global_batch_size": config.target_global_batch_size,
+                    "recipe_fingerprint": config.recipe_fingerprint,
+                    "comparison_fingerprint": config.comparison_fingerprint,
+                    "projection_scope": config.projection_scope,
+                    "projection_reference_loss": config.projection_reference_loss,
                     "epoch": epoch,
                     "lr": lr_used,
                     "total_loss": global_sums["total_loss"] / global_steps,

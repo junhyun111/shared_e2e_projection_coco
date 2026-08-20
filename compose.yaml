@@ -11,6 +11,7 @@ services:
       TORCH_HOME: /workspace/torch-cache
       NVIDIA_VISIBLE_DEVICES: ${GPU_IDS:-all}
       RUN_NAME: ${RUN_NAME:-}
+      AUX_WEIGHT: ${AUX_WEIGHT:-}
     volumes:
       - ${COCO_ROOT:?Set COCO_ROOT}:/workspace/data/coco:ro
       - ${OUTPUT_ROOT:-./artifacts}:/workspace/artifacts
@@ -41,10 +42,10 @@ services:
       - ${BATCH_SIZE:-4}
       - --target-global-batch-size
       - ${TARGET_GLOBAL_BATCH_SIZE:-32}
+      - --batch-recipe
+      - ${BATCH_RECIPE:-coco_gb32_optimized}
       - --precision
       - ${PRECISION:-fp32}
-      - --aux-weight
-      - ${AUX_WEIGHT:-2.0}
       - --num-workers
       - ${NUM_WORKERS:-8}
       - --performance-log-every

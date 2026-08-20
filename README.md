@@ -1,8 +1,9 @@
 # Deformable DETR + Shared-E2E Projection on COCO
 
 이 저장소는 official Deformable DETR의 **multi-scale R50, one-stage, no box
-refinement** 학습 recipe를 재현하고, 동일한 detector 위에서 Shared-E2E
-보조 학습과 representation gradient projection을 비교합니다.
+refinement** 구성에 기반해, 동일한 detector 위에서 Shared-E2E 보조 학습과
+representation gradient projection을 비교합니다. 원 논문의 global batch 16
+조건과 2×RTX 4090 처리량을 위한 global batch 32 조건은 별도 profile로 관리합니다.
 
 Official 소스는 `third_party/deformable_detr`에 고정되어 있으며 원본 커밋은
 `11169a60c33333af00a4849f1808023eba96a931`입니다. Hugging Face의 COCO 학습
@@ -17,37 +18,56 @@ ResNet-50과 새 transformer/head로 공통 detector 초기값을 만들고, 모
 | `baseline` | official Deformable DETR만 사용 |
 | `aux_no_adapter` | GT-center auxiliary localization, adapter 없음 |
 | `aux_only` | GT-center auxiliary localization + adapter |
-| `projected` | `aux_only` + micro-batch 단위 gradient projection |
+| `projected` | `aux_only` + rank별 micro-batch representation gradient projection |
 
 `aux_only`와 `projected`의 유일한 차이는 projection입니다. Baseline에는
 adapter, GT sampling, auxiliary loss, gradient hook이 생성되지 않습니다.
 
-## 고정 recipe
+`projected`는 encoder representation에서 **final decoder `loss_ce`**와
+GT-center auxiliary localization gradient의 충돌만 처리합니다. 중간 decoder
+layer들의 `loss_ce_0`, `loss_ce_1`, ... 전체를 projection 기준으로 사용하는
+구현은 아닙니다.
 
-- COCO 2017, 50 epochs, effective global batch 32
+## 실험 recipe
+
+두 batch profile을 명시적으로 구분합니다.
+
+| `--batch-recipe` | Effective global batch | 용도 |
+| --- | ---: | --- |
+| `coco_gb16_reference` | 16 | 원작의 8 GPU × GPU당 2장과 같은 global batch 기준 비교 |
+| `coco_gb32_optimized` | 32 | 2×RTX 4090 처리량 중심의 수정 recipe (기본값) |
+| `custom` | 사용자 지정 | 별도 ablation; `--target-global-batch-size` 필수 |
+
+`coco_gb16_reference`는 global batch와 learning rate 기준의 reference입니다.
+2 GPU에서 사용하는 physical micro-batch와 통신 패턴까지 원작의 8 GPU 실행과
+동일하다는 뜻은 아닙니다. 논문에는 global 16 결과와 global 32 결과를 서로 다른
+recipe로 보고해야 합니다.
+
+- COCO 2017, 50 epochs
 - AdamW: main `2e-4`, backbone `2e-5`, sampling/reference `2e-5`
 - weight decay `1e-4`, gradient clipping `0.1`
 - StepLR: epoch 40, gamma `0.1`
 - 300 queries, 6 encoder/6 decoder layers, 4 feature levels
 - Hungarian cost class/L1/GIoU = `2/5/2`
 - detection loss class/L1/GIoU = `2/5/2`, focal alpha `0.25`
-- auxiliary loss weight = `2.0`
+- auxiliary loss weight = `2.5` (단일 기본값; `AUX_WEIGHT` 또는 `--aux-weight`로 변경)
 - official decoder auxiliary losses enabled
 - official COCO random resize/crop augmentation
 - FP32 by default
 
-2 GPUs, GPU당 micro-batch 4라면 accumulation은 자동으로 다음과 같이
-계산됩니다.
+2 GPUs, GPU당 micro-batch 4라면 accumulation은 profile에 따라 자동 계산됩니다.
 
 ```text
-4 images/GPU * 2 GPUs * 4 micro-steps = 32 images/update
+coco_gb16_reference: 4 images/GPU * 2 GPUs * 2 micro-steps = 16 images/update
+coco_gb32_optimized: 4 images/GPU * 2 GPUs * 4 micro-steps = 32 images/update
 ```
 
 Detection loss와 제안 방법의 auxiliary loss는 모두 accumulation window 전체의
 DDP global GT box 수를 같은 분모로 사용합니다. 이미 window 기준으로
 정규화하므로 loss를 accumulation step 수로 다시 나누지 않습니다. 마지막
-불완전 window는 버립니다. Projection은 각 micro-batch에서 수행하고 parameter
-gradient는 effective batch 32까지 누적합니다.
+불완전 window는 버립니다. Projection은 각 rank의 각 micro-batch에서 수행하고
+parameter gradient는 선택한 effective global batch까지 누적한 뒤 DDP로
+동기화합니다.
 
 ## COCO 구조
 
@@ -97,6 +117,7 @@ docker run --rm \
     --output-root /workspace/artifacts \
     --torch-cache /workspace/torch-cache \
     --batch-size 4 \
+    --batch-recipe coco_gb32_optimized \
     --target-global-batch-size 32 \
     --train-limit 32 \
     --val-limit 16 \
@@ -120,16 +141,34 @@ torchrun --standalone --nproc_per_node=2 train.py \
   --data-root /workspace/data/coco \
   --output-root /workspace/artifacts \
   --batch-size 4 \
+  --batch-recipe coco_gb32_optimized \
   --target-global-batch-size 32 \
   --precision fp16 \
-  --run-name 4090_fp16_b4 \
   --resume auto
 ```
 
-`--run-name`을 생략해도 AMP 또는 기본값과 다른 batch 설정에는
-`fp16_batch4_global32` 같은 이름이 자동으로 붙습니다. GPU당 batch 8은 누적
-횟수를 2로 줄이지만 projection 단위도 바꾸므로 단순 가속 옵션이 아니라 별도
-실험 조건입니다. 같은 비교군의 모든 method에 동일한 batch 설정을 사용합니다.
+`--run-name`을 생략하면
+`gb32_optimized_fp16_b4_<recipe_fingerprint>` 형식의 이름이 자동으로 붙습니다.
+따라서 aux weight, precision 또는 batch 조건이 다른 새 실행이 기존 결과를
+덮어쓰지 않습니다. 명시적인 `--run-name`을 재사용할 때 기존 history나
+checkpoint가 있으면 `--resume auto` 없이 새 학습을 시작할 수 없습니다.
+
+GPU당 batch 8은 누적 횟수를 줄이지만 projected method의 projection 단위도
+바꾸므로 단순 가속 옵션이 아니라 별도 실험 조건입니다. 같은 비교군의 모든
+method에 동일한 precision, physical batch, batch profile을 사용합니다.
+
+### Projected + FP16 + 2 GPU 통합 smoke test
+
+CUDA op 단위 테스트 후에는 다음 스크립트로 실제 DDP/GradScaler/correction hook
+조합을 검증합니다. 기본 설정은 global batch 16, GPU당 4장, 32장 train subset,
+1 epoch입니다. 학습 후 같은 checkpoint를 한 번 재개하고 NaN/Inf, optimizer
+step skip, projection 통계, GradScaler 상태, 2 GPU runtime metadata를 검사합니다.
+
+```bash
+bash scripts/smoke_projected_amp.sh
+```
+
+성공하면 smoke run directory에 `smoke_report.json`이 생성됩니다.
 
 ## 본 실험
 
@@ -150,14 +189,32 @@ docker run --rm \
     --output-root /workspace/artifacts \
     --torch-cache /workspace/torch-cache \
     --batch-size 4 \
-    --target-global-batch-size 32 \
+    --batch-recipe coco_gb16_reference \
+    --target-global-batch-size 16 \
     --num-workers 8 \
     --seed 42 \
     --resume auto
 ```
 
-동일한 명령에서 `--method aux_only` 또는 `--method projected`만 바꿉니다.
+위 예시는 논문 reference용 global batch 16입니다. 4090 최적화 recipe를 별도로
+실행하려면 두 batch 인자를 각각 `coco_gb32_optimized`, `32`로 함께 바꿉니다.
+동일한 비교 matrix에서는 `--method aux_only` 또는 `--method projected`만 바꾸며,
 `scripts/`의 세 실행 파일도 같은 환경변수를 사용합니다.
+
+세 학습이 끝나면 checkpoint가 통제된 비교 조건인지 자동 검증합니다.
+
+```bash
+python scripts/validate_experiment_matrix.py \
+  /workspace/artifacts/baseline/seed_42/${BASELINE_RUN}/checkpoints/latest.pt \
+  /workspace/artifacts/aux_only/seed_42/${AUX_RUN}/checkpoints/latest.pt \
+  /workspace/artifacts/projected/seed_42/${PROJECTED_RUN}/checkpoints/latest.pt \
+  --output /workspace/artifacts/experiment_matrix.json
+```
+
+precision, physical/effective batch, profile, seed 등 공통 recipe와 detector
+초기화 fingerprint, upstream commit, world size가 모두 같아야 통과합니다.
+`aux_only`와 `projected`의 aux weight와 feature level도 별도로 대조합니다.
+각 checkpoint가 설정된 마지막 epoch까지 완료되었는지도 확인합니다.
 
 입력 대기와 GPU 계산 시간을 진단할 때만 `--performance-log-every 100`을
 추가합니다. 이 옵션은 지정한 optimizer step에서 CUDA synchronization을
@@ -172,8 +229,10 @@ docker compose up --build
 ```
 
 `.env`의 `GPU_IDS`, `NPROC_PER_NODE`, `METHOD`를 실험에 맞게 설정합니다.
-`PRECISION=fp32|fp16|bf16`으로 정밀도를 선택하며 Compose 기본값도 effective
-global batch 32입니다. Compose는 GPU device request를 `all`로 열고
+`PRECISION=fp32|fp16|bf16`으로 정밀도를 선택합니다. 기본값은
+`BATCH_RECIPE=coco_gb32_optimized`, effective global batch 32이며 auxiliary
+방법의 기본 weight는 모든 진입점에서 `2.5`입니다. Compose는 GPU device
+request를 `all`로 열고
 `NVIDIA_VISIBLE_DEVICES=${GPU_IDS}`로 실제 두 장만 노출하므로 `GPU_IDS=8,9` 같은
 비연속 host index도 사용할 수 있습니다.
 
@@ -203,7 +262,7 @@ post-processing을 제외하고 H2D 전송과 모델 forward를 warm-up 후 측�
 
 ```bash
 torchrun --standalone --nproc_per_node=2 benchmark_inference.py \
-  /workspace/artifacts/baseline/seed_42/4090_fp16_b4/checkpoints/latest.pt \
+  /workspace/artifacts/baseline/seed_42/${RUN_NAME}/checkpoints/latest.pt \
   --data-root /workspace/data/coco \
   --batch-size 1 \
   --inference-precision fp16 \
@@ -249,9 +308,7 @@ artifacts/
 ├── initializations/
 │   └── deformable_detr_r50_seed_42.pt
 ├── baseline/seed_42/
-│   ├── history.csv                 # 기본 FP32 recipe
-│   ├── checkpoints/
-│   └── 4090_fp16_b4/               # --run-name을 사용한 별도 recipe
+│   └── gb32_optimized_fp16_b4_<hash>/
 │       ├── history.csv
 │       └── checkpoints/
 ├── aux_only/seed_42/
@@ -259,16 +316,18 @@ artifacts/
 ```
 
 `--resume auto`는 해당 method/seed/run-name의 `latest.pt`를 찾습니다. 재시작 시
-method, recipe fingerprint, official upstream commit, detector initialization
+method, 정규화한 recipe, official upstream commit, detector initialization
 fingerprint, world size를 검사하고 optimizer, scheduler, scaler와 main process의
-Python/NumPy/Torch/CUDA RNG 상태를 복원합니다.
+Python/NumPy/Torch/CUDA RNG 상태를 복원합니다. Baseline에서 사용하지 않는
+`aux_weight`와 `feature_level`은 baseline checkpoint 호환성 판단에서 제외되지만,
+auxiliary method에서는 정확히 일치해야 합니다.
 
 `num_workers > 0`에서는 처리량을 위해 DataLoader worker를 epoch 사이에
 유지합니다. Worker별 Python/NumPy RNG 상태는 checkpoint에 저장되지 않으므로
 resume 후 `DistributedSampler`의 데이터 순서는 같지만 random resize/crop/flip은
 중단 없이 실행한 경우와 bit-exact하게 같지 않습니다.
 
-AMP는 official FP32 recipe와 다른 실험이므로 기본값은 꺼져 있습니다. 새 실행은
+AMP는 FP32 reference와 다른 실험 조건이므로 기본값은 꺼져 있습니다. 새 실행은
 `--precision`을 사용하며 기존 `--amp`도 FP16 호환 alias로 유지됩니다.
 
 ## 검증
@@ -277,7 +336,7 @@ Docker 이미지 안에서 다음을 실행합니다.
 
 ```bash
 python -m pytest -q
-python -m compileall -q train.py evaluate.py evaluate_official.py benchmark_inference.py projection_coco tests
+python -m compileall -q train.py evaluate.py evaluate_official.py benchmark_inference.py projection_coco scripts tests
 ```
 
 4090 서버에서는 CUDA extension을 빌드한 이미지로

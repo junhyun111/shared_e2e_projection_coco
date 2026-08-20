@@ -49,6 +49,33 @@ def resolve_resume_path(resume_from: str | Path | None, config: TrainConfig):
     return Path(resume_from).expanduser().resolve()
 
 
+def _checkpoint_recipe_dict(checkpoint: dict, config: TrainConfig) -> dict | None:
+    stored_recipe = checkpoint.get("recipe")
+    if isinstance(stored_recipe, dict):
+        return stored_recipe
+    saved_config = checkpoint.get("config")
+    if not isinstance(saved_config, dict):
+        return None
+    try:
+        restored = TrainConfig.from_dict(
+            saved_config,
+            data_root=config.data_root,
+            output_root=config.output_root,
+            run_name=None,
+        )
+    except (TypeError, ValueError):
+        return None
+    return restored.recipe_dict()
+
+
+def _recipe_differences(saved: dict, expected: dict) -> list[str]:
+    differences = []
+    for key in sorted(set(saved) | set(expected)):
+        if saved.get(key) != expected.get(key):
+            differences.append(key)
+    return differences
+
+
 def load_training_checkpoint(
     resume_from: str | Path | None,
     model,
@@ -67,7 +94,15 @@ def load_training_checkpoint(
     checkpoint = torch.load(path, map_location="cpu")
     if checkpoint.get("method") != config.method:
         raise ValueError("Checkpoint method does not match this run")
-    if checkpoint.get("recipe_fingerprint") != config.recipe_fingerprint:
+    saved_recipe = _checkpoint_recipe_dict(checkpoint, config)
+    if saved_recipe is not None:
+        differences = _recipe_differences(saved_recipe, config.recipe_dict())
+        if differences:
+            raise ValueError(
+                "Checkpoint training recipe does not match this run; differing "
+                f"fields: {', '.join(differences)}"
+            )
+    elif checkpoint.get("recipe_fingerprint") != config.recipe_fingerprint:
         raise ValueError("Checkpoint training recipe does not match this run")
     if checkpoint.get("upstream_commit") != upstream_commit():
         raise ValueError("Checkpoint upstream commit does not match this run")
@@ -106,11 +141,15 @@ def save_training_checkpoint(
     context.barrier()
     if context.is_main:
         state = {
-            "format_version": 2,
+            "format_version": 3,
+            "recipe_schema_version": 2,
             "method": config.method,
             "upstream_commit": upstream_commit(),
             "runtime": runtime_metadata(),
             "recipe_fingerprint": config.recipe_fingerprint,
+            "recipe": config.recipe_dict(),
+            "comparison_fingerprint": config.comparison_fingerprint,
+            "method_definition": config.method_definition,
             "initialization_fingerprint": initialization_fingerprint,
             "config": config.as_dict(),
             "world_size": context.world_size,
