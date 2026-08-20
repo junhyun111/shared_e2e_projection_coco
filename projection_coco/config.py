@@ -23,7 +23,7 @@ METHODS: tuple[Method, ...] = (
     "aux_no_adapter",
 )
 AMP_DTYPES: tuple[AmpDType, ...] = ("float16", "bfloat16")
-DEFAULT_AUX_WEIGHT = 2.0
+DEFAULT_AUX_WEIGHT = 2.5
 
 
 @dataclass(frozen=True)
