@@ -9,3 +9,4 @@ torch-cache/
 *.pt
 *.pth
 *.csv
+r50_deformable_detr-log.txt

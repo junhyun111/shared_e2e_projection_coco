@@ -38,7 +38,7 @@ class TrainConfig:
     grad_clip: float = 0.1
     lr_drop_epoch: int = 40
     lr_drop_gamma: float = 0.1
-    aux_weight: float = 0.5
+    aux_weight: float = 2.0
     feature_level: int = 0
     seed: int = 42
     train_limit: int | None = None
