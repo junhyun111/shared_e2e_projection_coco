@@ -1,11 +1,37 @@
 from __future__ import annotations
 
 import os
+import platform
 from dataclasses import dataclass
 from datetime import timedelta
 
 import torch
 import torch.distributed as dist
+
+
+def runtime_metadata() -> dict:
+    devices = []
+    if torch.cuda.is_available():
+        for index in range(torch.cuda.device_count()):
+            properties = torch.cuda.get_device_properties(index)
+            devices.append(
+                {
+                    "index": index,
+                    "name": properties.name,
+                    "compute_capability": (
+                        f"{properties.major}.{properties.minor}"
+                    ),
+                    "total_memory_mb": properties.total_memory // 2**20,
+                }
+            )
+    return {
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "torch_cuda": torch.version.cuda,
+        "cudnn": torch.backends.cudnn.version(),
+        "cuda_available": torch.cuda.is_available(),
+        "devices": devices,
+    }
 
 
 @dataclass(frozen=True)

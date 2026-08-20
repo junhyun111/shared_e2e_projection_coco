@@ -17,10 +17,11 @@ def project_conflicting_gradient(
     cosine = dot / (classification_norm * auxiliary_norm + epsilon)
     applied = dot < 0
     coefficient = dot / (classification_norm_squared + epsilon)
-    conflicting_projection = auxiliary_gradient - coefficient.to(
-        auxiliary_gradient.dtype
-    ) * classification_gradient
-    projected = torch.where(applied, conflicting_projection, auxiliary_gradient)
+    conflicting_projection = auxiliary_float - coefficient * classification_float
+    projected_float = torch.where(
+        applied, conflicting_projection, auxiliary_float
+    )
+    projected = projected_float.to(dtype=auxiliary_gradient.dtype)
     projected_float = projected.detach().float()
     projected_norm = projected_float.square().sum().sqrt()
     projected_dot = (classification_float * projected_float).sum()
@@ -68,7 +69,10 @@ def register_representation_gradient_correction(
     grad_scale: float,
 ):
     correction = (
-        (projected_auxiliary_gradient - raw_auxiliary_gradient).detach()
+        (
+            projected_auxiliary_gradient.detach().float()
+            - raw_auxiliary_gradient.detach().float()
+        )
         * float(auxiliary_weight)
         * float(grad_scale)
     )

@@ -42,3 +42,14 @@ def test_projection_statistics_stay_as_tensors():
     _, stats = project_conflicting_gradient(classification, auxiliary)
 
     assert all(isinstance(value, torch.Tensor) for value in stats.values())
+
+
+def test_projection_computes_half_precision_inputs_in_fp32():
+    classification = torch.tensor([1.0, 0.0], dtype=torch.float16)
+    auxiliary = torch.tensor([-2.0, 3.0], dtype=torch.float16)
+
+    projected, stats = project_conflicting_gradient(classification, auxiliary)
+
+    assert projected.dtype == torch.float16
+    assert torch.equal(projected, torch.tensor([0.0, 3.0], dtype=torch.float16))
+    assert stats["cls_aux_dot_raw"].dtype == torch.float32

@@ -204,10 +204,11 @@ class AuxiliaryModel(nn.Module):
         raw_features = selected["features"]
         used = len(raw_features)
         if used == 0:
-            zero = (
-                self.encoder_representation.sum() * 0.0
-                + self.adapter(raw_features).sum()
-            )
+            with torch.autocast(device_type="cuda", enabled=False):
+                zero = (
+                    self.encoder_representation.float().sum() * 0.0
+                    + self.adapter(raw_features.float()).sum()
+                )
             return {
                 "loss": zero,
                 "l1": zero,
@@ -216,26 +217,32 @@ class AuxiliaryModel(nn.Module):
                 "stats": {},
             }
 
-        adapted = self.adapter(raw_features)
-        delta = self.shared_bbox_head(adapted)
-        center_logits = delta[..., :2] + inverse_sigmoid(selected["references"])
-        predicted = torch.cat((center_logits, delta[..., 2:]), dim=-1).sigmoid()
-        target_boxes = selected["targets"]
-        loss_l1 = (
-            F.l1_loss(predicted, target_boxes, reduction="none").sum()
-            / normalizer
-        )
-        giou = generalized_box_iou(
-            cxcywh_to_xyxy(predicted), cxcywh_to_xyxy(target_boxes)
-        )
-        loss_giou = (1.0 - torch.diag(giou)).sum() / normalizer
+        # This branch defines the gradient that is compared and projected by
+        # the research method. Keep it in FP32 so AMP changes detector compute,
+        # not the numerical definition of the projection operation.
+        with torch.autocast(device_type="cuda", enabled=False):
+            raw_features_float = raw_features.float()
+            adapted = self.adapter(raw_features_float)
+            delta = self.shared_bbox_head(adapted)
+            references = selected["references"].float()
+            center_logits = delta[..., :2] + inverse_sigmoid(references)
+            predicted = torch.cat((center_logits, delta[..., 2:]), dim=-1).sigmoid()
+            target_boxes = selected["targets"].float()
+            loss_l1 = (
+                F.l1_loss(predicted, target_boxes, reduction="none").sum()
+                / normalizer
+            )
+            giou = generalized_box_iou(
+                cxcywh_to_xyxy(predicted), cxcywh_to_xyxy(target_boxes)
+            )
+            loss_giou = (1.0 - torch.diag(giou)).sum() / normalizer
         return {
             "loss": 5.0 * loss_l1 + 2.0 * loss_giou,
             "l1": loss_l1,
             "giou": loss_giou,
             "selected": selected,
             "stats": {
-                "raw_feature_norm": raw_features.detach().norm(dim=-1).mean(),
+                "raw_feature_norm": raw_features_float.detach().norm(dim=-1).mean(),
                 "adapted_feature_norm": adapted.detach().norm(dim=-1).mean(),
             },
         }

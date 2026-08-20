@@ -23,9 +23,22 @@ def evaluate_coco(
     val_loader,
     coco_api,
     context: DistributedContext,
+    *,
+    inference_precision: str = "fp32",
 ) -> dict[str, float]:
+    if inference_precision not in {"fp32", "fp16", "bf16"}:
+        raise ValueError("inference_precision must be fp32, fp16 or bf16")
+    if inference_precision != "fp32" and context.device.type != "cuda":
+        raise ValueError("Mixed-precision inference requires CUDA")
+    autocast_dtype = {
+        "fp32": torch.float16,
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+    }[inference_precision]
     model.eval()
     evaluator = CocoEvaluator(coco_api, ("bbox",))
+    if context.device.type == "cuda":
+        torch.cuda.synchronize(context.device)
     start = time.perf_counter()
     iterator = tqdm(
         val_loader,
@@ -40,8 +53,18 @@ def evaluate_coco(
             {key: value.to(context.device) for key, value in target.items()}
             for target in targets
         ]
-        result = model(samples, None)
-        outputs = result["detector_outputs"]
+        with torch.autocast(
+            device_type="cuda",
+            dtype=autocast_dtype,
+            enabled=inference_precision != "fp32",
+        ):
+            result = model(samples, None)
+        detector_outputs = result["detector_outputs"]
+        outputs = {
+            **detector_outputs,
+            "pred_logits": detector_outputs["pred_logits"].float(),
+            "pred_boxes": detector_outputs["pred_boxes"].float(),
+        }
         original_sizes = torch.stack(
             [target["orig_size"] for target in device_targets], dim=0
         )
@@ -62,6 +85,8 @@ def evaluate_coco(
         with redirect_stdout(io.StringIO()):
             evaluator.summarize()
 
+    if context.device.type == "cuda":
+        torch.cuda.synchronize(context.device)
     stats = evaluator.coco_eval["bbox"].stats
     return {
         "map": float(stats[0]),

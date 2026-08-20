@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import random
+import re
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,12 +15,15 @@ import torch
 
 
 Method = Literal["baseline", "aux_only", "projected", "aux_no_adapter"]
+AmpDType = Literal["float16", "bfloat16"]
 METHODS: tuple[Method, ...] = (
     "baseline",
     "aux_only",
     "projected",
     "aux_no_adapter",
 )
+AMP_DTYPES: tuple[AmpDType, ...] = ("float16", "bfloat16")
+DEFAULT_AUX_WEIGHT = 2.0
 
 
 @dataclass(frozen=True)
@@ -38,7 +42,7 @@ class TrainConfig:
     grad_clip: float = 0.1
     lr_drop_epoch: int = 40
     lr_drop_gamma: float = 0.1
-    aux_weight: float = 2.0
+    aux_weight: float = DEFAULT_AUX_WEIGHT
     feature_level: int = 0
     seed: int = 42
     train_limit: int | None = None
@@ -48,9 +52,11 @@ class TrainConfig:
     gradient_log_every: int = 100
     performance_log_every: int = 0
     amp: bool = False
+    amp_dtype: AmpDType = "float16"
     deterministic: bool = False
     cache_mode: bool = False
     skip_initial_eval: bool = True
+    run_name: str | None = None
 
     # Official Deformable DETR R50, multi-scale, one-stage recipe.
     backbone: str = "resnet50"
@@ -107,6 +113,17 @@ class TrainConfig:
             raise ValueError("num_workers must be non-negative")
         if self.performance_log_every < 0:
             raise ValueError("performance_log_every must be non-negative")
+        if self.amp_dtype not in AMP_DTYPES:
+            raise ValueError(
+                f"amp_dtype must be one of {', '.join(AMP_DTYPES)}"
+            )
+        if self.run_name is not None and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*", self.run_name
+        ):
+            raise ValueError(
+                "run_name must start with an alphanumeric character and contain "
+                "only letters, numbers, '.', '_' or '-'"
+            )
         if self.weight_decay < 0:
             raise ValueError("weight_decay must be non-negative")
         if self.uses_auxiliary and self.aux_weight <= 0:
@@ -136,6 +153,18 @@ class TrainConfig:
     def uses_projection(self) -> bool:
         return self.method == "projected"
 
+    @property
+    def precision(self) -> str:
+        return self.amp_dtype if self.amp else "float32"
+
+    @property
+    def autocast_dtype(self) -> torch.dtype:
+        return torch.float16 if self.amp_dtype == "float16" else torch.bfloat16
+
+    @property
+    def uses_grad_scaler(self) -> bool:
+        return self.amp and self.amp_dtype == "float16"
+
     def accumulation_steps(self, world_size: int) -> int:
         micro_global_batch = self.batch_size * world_size
         if self.target_global_batch_size % micro_global_batch != 0:
@@ -147,7 +176,8 @@ class TrainConfig:
 
     @property
     def run_dir(self) -> Path:
-        return self.output_root / self.method / f"seed_{self.seed}"
+        base = self.output_root / self.method / f"seed_{self.seed}"
+        return base / self.run_name if self.run_name is not None else base
 
     @property
     def checkpoint_dir(self) -> Path:
@@ -194,8 +224,13 @@ class TrainConfig:
             "gradient_log_every",
             "performance_log_every",
             "skip_initial_eval",
+            "run_name",
         ):
             values.pop(key, None)
+        # Keep legacy FP32 checkpoint fingerprints stable. The AMP dtype has no
+        # effect when autocast is disabled.
+        if not values["amp"]:
+            values.pop("amp_dtype", None)
         return values
 
     def detector_recipe_dict(self) -> dict:

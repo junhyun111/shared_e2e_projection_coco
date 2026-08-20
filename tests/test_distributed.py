@@ -1,6 +1,10 @@
 import torch
 
-from projection_coco.distributed import DistributedContext, reduce_sums
+from projection_coco.distributed import (
+    DistributedContext,
+    reduce_sums,
+    runtime_metadata,
+)
 
 
 def test_reduce_sums_converts_device_tensors_once_at_the_boundary():
@@ -32,3 +36,11 @@ def test_all_true_accepts_scalar_tensor():
 
     assert context.all_true(torch.tensor(True)) is True
     assert context.all_true(torch.tensor(False)) is False
+
+
+def test_runtime_metadata_has_reproducibility_versions():
+    metadata = runtime_metadata()
+
+    assert metadata["python"]
+    assert metadata["torch"] == torch.__version__
+    assert isinstance(metadata["devices"], list)

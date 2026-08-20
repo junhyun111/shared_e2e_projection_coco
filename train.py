@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 from projection_coco.config import (
+    AMP_DTYPES,
+    DEFAULT_AUX_WEIGHT,
     METHODS,
     TrainConfig,
     configure_torch_cache,
@@ -51,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backbone-lr", type=float, default=2e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-clip", type=float, default=0.1)
-    parser.add_argument("--aux-weight", type=float, default=0.5)
+    parser.add_argument("--aux-weight", type=float, default=DEFAULT_AUX_WEIGHT)
     parser.add_argument("--feature-level", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train-limit", type=optional_positive_int, default=None)
@@ -71,8 +73,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--amp",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Experimental deviation from the official FP32 recipe",
+        default=None,
+        help="Legacy alias for --precision fp16 (or --no-amp for fp32)",
+    )
+    parser.add_argument(
+        "--amp-dtype",
+        choices=AMP_DTYPES,
+        default="float16",
+        help="Autocast dtype used with the legacy --amp flag",
+    )
+    parser.add_argument(
+        "--precision",
+        choices=("fp32", "fp16", "bf16"),
+        default=None,
+        help="Training precision; mixed precision is a separate research recipe",
     )
     parser.add_argument(
         "--deterministic", action=argparse.BooleanOptionalAction, default=False
@@ -84,11 +98,48 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-initial-eval", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--allow-cpu", action="store_true")
+    parser.add_argument(
+        "--run-name",
+        default=os.environ.get("RUN_NAME") or None,
+        help="Optional isolated run directory below method/seed",
+    )
     return parser
 
 
+def _resolve_precision(args, parser: argparse.ArgumentParser) -> tuple[bool, str]:
+    if args.precision is not None and args.amp is not None:
+        parser.error("use either --precision or --amp/--no-amp, not both")
+    if args.precision is not None:
+        return (
+            args.precision != "fp32",
+            {"fp32": "float16", "fp16": "float16", "bf16": "bfloat16"}[
+                args.precision
+            ],
+        )
+    return bool(args.amp), args.amp_dtype
+
+
+def _resolve_run_name(args, *, amp: bool, amp_dtype: str) -> str | None:
+    if args.run_name is not None:
+        return args.run_name
+    if amp or args.batch_size != 4 or args.target_global_batch_size != 32:
+        precision = (
+            {"float16": "fp16", "bfloat16": "bf16"}[amp_dtype]
+            if amp
+            else "fp32"
+        )
+        return (
+            f"{precision}_batch{args.batch_size}_global"
+            f"{args.target_global_batch_size}"
+        )
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    amp, amp_dtype = _resolve_precision(args, parser)
+    run_name = _resolve_run_name(args, amp=amp, amp_dtype=amp_dtype)
     configure_torch_cache(args.torch_cache)
     config = TrainConfig(
         data_root=args.data_root,
@@ -111,10 +162,12 @@ def main(argv: list[str] | None = None) -> int:
         save_every=args.save_every,
         gradient_log_every=args.gradient_log_every,
         performance_log_every=args.performance_log_every,
-        amp=args.amp,
+        amp=amp,
+        amp_dtype=amp_dtype,
         deterministic=args.deterministic,
         cache_mode=args.cache_mode,
         skip_initial_eval=args.skip_initial_eval,
+        run_name=run_name,
     )
     context = initialize_distributed(allow_cpu=args.allow_cpu)
     try:

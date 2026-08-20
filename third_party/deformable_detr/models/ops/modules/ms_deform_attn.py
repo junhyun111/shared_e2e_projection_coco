@@ -109,7 +109,15 @@ class MSDeformAttn(nn.Module):
         else:
             raise ValueError(
                 'Last dim of reference_points must be 2 or 4, but get {} instead.'.format(reference_points.shape[-1]))
-        output = MSDeformAttnFunction.apply(
-            value, input_spatial_shapes, input_level_start_index, sampling_locations, attention_weights, self.im2col_step)
+        # The vendored CUDA kernel dispatches float/double only. Keep this
+        # custom operator in FP32 under AMP instead of silently relying on an
+        # unsupported half/bfloat16 kernel. Casts remain differentiable, so
+        # gradients return to the surrounding autocast dtype.
+        output_dtype = value.dtype
+        with torch.autocast(device_type='cuda', enabled=False):
+            output = MSDeformAttnFunction.apply(
+                value.float(), input_spatial_shapes, input_level_start_index,
+                sampling_locations.float(), attention_weights.float(), self.im2col_step)
+        output = output.to(dtype=output_dtype)
         output = self.output_proj(output)
         return output

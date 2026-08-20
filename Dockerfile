@@ -23,7 +23,7 @@ RUN cd third_party/deformable_detr \
     && FORCE_CUDA=1 python -m pip install --no-build-isolation ./models/ops
 
 COPY projection_coco ./projection_coco
-COPY train.py evaluate.py evaluate_official.py ./
+COPY train.py evaluate.py evaluate_official.py benchmark_inference.py ./
 COPY tests ./tests
 COPY scripts ./scripts
 RUN chmod +x scripts/*.sh

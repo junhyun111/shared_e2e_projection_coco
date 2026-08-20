@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from .config import TrainConfig
-from .distributed import DistributedContext
+from .distributed import DistributedContext, runtime_metadata
 from .upstream import upstream_commit
 
 
@@ -109,6 +109,7 @@ def save_training_checkpoint(
             "format_version": 2,
             "method": config.method,
             "upstream_commit": upstream_commit(),
+            "runtime": runtime_metadata(),
             "recipe_fingerprint": config.recipe_fingerprint,
             "initialization_fingerprint": initialization_fingerprint,
             "config": config.as_dict(),
@@ -149,4 +150,3 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writeheader()
         writer.writerows(rows)
     os.replace(temporary, path)
-

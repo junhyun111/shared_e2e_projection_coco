@@ -56,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--torch-cache", type=Path, default=None)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument(
+        "--inference-precision",
+        choices=("fp32", "fp16", "bf16"),
+        default="fp32",
+    )
     parser.add_argument("--allow-cpu", action="store_true")
     return parser
 
@@ -141,7 +146,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"COCO-val={len(bundle.val_dataset)} world_size={context.world_size}"
             )
         metrics = evaluate_coco(
-            model, postprocessors, val_loader, bundle.coco_api, context
+            model,
+            postprocessors,
+            val_loader,
+            bundle.coco_api,
+            context,
+            inference_precision=args.inference_precision,
         )
         if context.is_main:
             json_path, png_path, report = write_official_evaluation_report(
@@ -152,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
                 num_images=len(bundle.val_dataset),
                 world_size=context.world_size,
                 batch_size=config.batch_size,
+                inference_precision=args.inference_precision,
             )
             print(json.dumps(report, indent=2, ensure_ascii=False))
             print(f"[official-eval] JSON: {json_path}")

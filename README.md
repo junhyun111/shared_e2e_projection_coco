@@ -31,6 +31,7 @@ adapter, GT sampling, auxiliary loss, gradient hook이 생성되지 않습니다
 - 300 queries, 6 encoder/6 decoder layers, 4 feature levels
 - Hungarian cost class/L1/GIoU = `2/5/2`
 - detection loss class/L1/GIoU = `2/5/2`, focal alpha `0.25`
+- auxiliary loss weight = `2.0`
 - official decoder auxiliary losses enabled
 - official COCO random resize/crop augmentation
 - FP32 by default
@@ -106,6 +107,30 @@ docker run --rm \
 로그에서 `world_size=2`, `gradient_accumulation_steps=4`,
 `effective_global_batch_size=32`를 확인합니다.
 
+### RTX 4090 mixed precision 실험
+
+FP32 재현 실험이 정상인지 먼저 확인한 뒤 `--precision fp16` 또는
+`--precision bf16`을 별도 recipe로 실행합니다. Mixed precision에서도 vendored
+`MSDeformAttn` CUDA 연산, Hungarian matching/detection loss, auxiliary projection
+계산은 FP32로 유지됩니다. FP16은 GradScaler를 사용하고 BF16은 사용하지 않습니다.
+
+```bash
+torchrun --standalone --nproc_per_node=2 train.py \
+  --method baseline \
+  --data-root /workspace/data/coco \
+  --output-root /workspace/artifacts \
+  --batch-size 4 \
+  --target-global-batch-size 32 \
+  --precision fp16 \
+  --run-name 4090_fp16_b4 \
+  --resume auto
+```
+
+`--run-name`을 생략해도 AMP 또는 기본값과 다른 batch 설정에는
+`fp16_batch4_global32` 같은 이름이 자동으로 붙습니다. GPU당 batch 8은 누적
+횟수를 2로 줄이지만 projection 단위도 바꾸므로 단순 가속 옵션이 아니라 별도
+실험 조건입니다. 같은 비교군의 모든 method에 동일한 batch 설정을 사용합니다.
+
 ## 본 실험
 
 먼저 baseline 50 epochs를 끝내고 AP가 합리적으로 재현되는지 확인한 뒤
@@ -146,8 +171,11 @@ cp .env.example .env
 docker compose up --build
 ```
 
-`.env`의 `GPU_IDS=8,9`, `NPROC_PER_NODE=2`, `METHOD`를 실험에 맞게
-설정합니다. Compose 기본값도 effective global batch 32입니다.
+`.env`의 `GPU_IDS`, `NPROC_PER_NODE`, `METHOD`를 실험에 맞게 설정합니다.
+`PRECISION=fp32|fp16|bf16`으로 정밀도를 선택하며 Compose 기본값도 effective
+global batch 32입니다. Compose는 GPU device request를 `all`로 열고
+`NVIDIA_VISIBLE_DEVICES=${GPU_IDS}`로 실제 두 장만 노출하므로 `GPU_IDS=8,9` 같은
+비연속 host index도 사용할 수 있습니다.
 
 ## 평가
 
@@ -165,6 +193,23 @@ docker run --rm \
 
 평가는 모든 rank가 COCO validation을 나눠 수행하고 official
 `pycocotools.COCOeval` 결과를 병합합니다.
+
+체크포인트의 FP16 COCO AP를 별도로 확인하려면 `evaluate.py`에
+`--inference-precision fp16`을 지정합니다. 출력은 post-processing 전에 FP32로
+복원됩니다.
+
+순수 처리량은 COCO 평가 시간과 분리해서 측정합니다. 다음 명령은 loader와 COCO
+post-processing을 제외하고 H2D 전송과 모델 forward를 warm-up 후 측정합니다.
+
+```bash
+torchrun --standalone --nproc_per_node=2 benchmark_inference.py \
+  /workspace/artifacts/baseline/seed_42/4090_fp16_b4/checkpoints/latest.pt \
+  --data-root /workspace/data/coco \
+  --batch-size 1 \
+  --inference-precision fp16 \
+  --warmup-steps 20 \
+  --measure-steps 100
+```
 
 ### 공식 체크포인트 재현 평가
 
@@ -204,15 +249,16 @@ artifacts/
 ├── initializations/
 │   └── deformable_detr_r50_seed_42.pt
 ├── baseline/seed_42/
-│   ├── history.csv
-│   └── checkpoints/
-│       ├── latest.pt
-│       └── epoch_050.pt
+│   ├── history.csv                 # 기본 FP32 recipe
+│   ├── checkpoints/
+│   └── 4090_fp16_b4/               # --run-name을 사용한 별도 recipe
+│       ├── history.csv
+│       └── checkpoints/
 ├── aux_only/seed_42/
 └── projected/seed_42/
 ```
 
-`--resume auto`는 해당 method/seed의 `latest.pt`를 찾습니다. 재시작 시
+`--resume auto`는 해당 method/seed/run-name의 `latest.pt`를 찾습니다. 재시작 시
 method, recipe fingerprint, official upstream commit, detector initialization
 fingerprint, world size를 검사하고 optimizer, scheduler, scaler와 main process의
 Python/NumPy/Torch/CUDA RNG 상태를 복원합니다.
@@ -222,8 +268,8 @@ Python/NumPy/Torch/CUDA RNG 상태를 복원합니다.
 resume 후 `DistributedSampler`의 데이터 순서는 같지만 random resize/crop/flip은
 중단 없이 실행한 경우와 bit-exact하게 같지 않습니다.
 
-AMP는 official FP32 recipe와 다른 실험이므로 기본값은 꺼져 있습니다.
-`--amp`는 CUDA operator 호환성을 별도로 검증한 경우에만 사용합니다.
+AMP는 official FP32 recipe와 다른 실험이므로 기본값은 꺼져 있습니다. 새 실행은
+`--precision`을 사용하며 기존 `--amp`도 FP16 호환 alias로 유지됩니다.
 
 ## 검증
 
@@ -231,8 +277,12 @@ Docker 이미지 안에서 다음을 실행합니다.
 
 ```bash
 python -m pytest -q
-python -m compileall -q train.py evaluate.py evaluate_official.py projection_coco tests
+python -m compileall -q train.py evaluate.py evaluate_official.py benchmark_inference.py projection_coco tests
 ```
+
+4090 서버에서는 CUDA extension을 빌드한 이미지로
+`python -m pytest -q tests/test_amp_cuda.py`를 추가 실행해 FP16/BF16
+`MSDeformAttn` forward/backward가 유한한지 확인합니다.
 
 Vendored 코드는 [Apache License 2.0](third_party/deformable_detr/LICENSE)을
 유지합니다. 자세한 출처는 `THIRD_PARTY_NOTICES.md`에 기록되어 있습니다.

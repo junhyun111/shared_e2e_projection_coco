@@ -29,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument(
+        "--inference-precision",
+        choices=("fp32", "fp16", "bf16"),
+        default="fp32",
+    )
     parser.add_argument("--allow-cpu", action="store_true")
     return parser
 
@@ -42,9 +47,10 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("Checkpoint does not contain its training configuration")
     if checkpoint.get("upstream_commit") != upstream_commit():
         raise ValueError("Checkpoint upstream commit does not match this checkout")
+    output_root_parent_index = 4 if saved_config.get("run_name") else 3
     default_output_root = (
-        checkpoint_path.parents[3]
-        if len(checkpoint_path.parents) > 3
+        checkpoint_path.parents[output_root_parent_index]
+        if len(checkpoint_path.parents) > output_root_parent_index
         else checkpoint_path.parent
     )
     output_root = args.output_root or default_output_root
@@ -69,10 +75,20 @@ def main(argv: list[str] | None = None) -> int:
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)
         val_loader = make_val_loader(config, bundle, context)
         metrics = evaluate_coco(
-            model, postprocessors, val_loader, bundle.coco_api, context
+            model,
+            postprocessors,
+            val_loader,
+            bundle.coco_api,
+            context,
+            inference_precision=args.inference_precision,
         )
         if context.is_main:
-            print(json.dumps(metrics, indent=2))
+            print(
+                json.dumps(
+                    {"inference_precision": args.inference_precision, **metrics},
+                    indent=2,
+                )
+            )
         model.close()
     finally:
         cleanup_distributed(context)

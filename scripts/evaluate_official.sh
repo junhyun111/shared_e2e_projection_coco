@@ -22,4 +22,5 @@ torchrun --standalone --nproc_per_node="${NPROC_PER_NODE:-2}" \
   --output-dir "${OFFICIAL_EVAL_OUTPUT:-${OUTPUT_ROOT:-/workspace/artifacts}/official_checkpoint_eval}" \
   --torch-cache "${TORCH_CACHE:-${TORCH_HOME:-/workspace/torch-cache}}" \
   --batch-size "${EVAL_BATCH_SIZE:-4}" \
+  --inference-precision "${INFERENCE_PRECISION:-fp32}" \
   --num-workers "${NUM_WORKERS:-8}"

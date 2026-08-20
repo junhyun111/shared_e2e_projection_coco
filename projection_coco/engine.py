@@ -23,7 +23,7 @@ from .data import (
     make_val_loader,
     set_train_loader_epoch,
 )
-from .distributed import DistributedContext, reduce_sums
+from .distributed import DistributedContext, reduce_sums, runtime_metadata
 from .evaluator import evaluate_coco
 from .initialization import ensure_detector_initialization
 from .methods import (
@@ -32,6 +32,26 @@ from .methods import (
     representation_projected_gradients,
 )
 from .optimizer import make_optimizer
+
+
+def _autocast_context(config: TrainConfig, device: torch.device):
+    return torch.autocast(
+        device_type="cuda",
+        dtype=config.autocast_dtype,
+        enabled=config.amp and device.type == "cuda",
+    )
+
+
+def _float_detection_outputs(value):
+    if isinstance(value, torch.Tensor):
+        return value.float() if value.is_floating_point() else value
+    if isinstance(value, dict):
+        return {key: _float_detection_outputs(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_float_detection_outputs(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_float_detection_outputs(item) for item in value)
+    return value
 
 
 def _full_windows(loader, size: int):
@@ -151,7 +171,7 @@ def train(
         gamma=config.lr_drop_gamma,
     )
     scaler = torch.cuda.amp.GradScaler(
-        enabled=config.amp and context.device.type == "cuda"
+        enabled=config.uses_grad_scaler and context.device.type == "cuda"
     )
     start_epoch, elapsed_train, history, gradient_history, resume_path = (
         load_training_checkpoint(
@@ -180,6 +200,7 @@ def train(
 
     if context.is_main:
         print(config.to_json(context.world_size))
+        print(f"[runtime] {runtime_metadata()}")
         print(
             f"[upstream] detector_init={initialization_fingerprint} "
             f"optimizer_groups={optimizer_summary.as_dict()}"
@@ -189,8 +210,8 @@ def train(
         )
         if config.amp:
             print(
-                "[warning] AMP is an explicit deviation from the official FP32 recipe; "
-                "validate the upstream CUDA operator before a full run."
+                f"[precision] {config.precision}; MSDeformAttn, detection losses, "
+                "and auxiliary localization use FP32 safety boundaries"
             )
         if resume_path is not None:
             print(f"[resume] {resume_path} -> epoch {start_epoch}")
@@ -284,16 +305,19 @@ def train(
                     projection_stats = None
 
                     with sync_context:
-                        with torch.cuda.amp.autocast(
-                            enabled=config.amp and context.device.type == "cuda"
-                        ):
+                        with _autocast_context(config, context.device):
                             result = training_model(
                                 samples,
                                 targets,
                                 aux_normalizer=num_boxes,
                             )
+                        # Matching, focal/L1/GIoU losses and their reductions are
+                        # intentionally kept in FP32 for research stability.
+                        with torch.autocast(device_type="cuda", enabled=False):
                             loss_dict = criterion(
-                                result["detector_outputs"],
+                                _float_detection_outputs(
+                                    result["detector_outputs"]
+                                ),
                                 targets,
                                 num_boxes_override=num_boxes,
                             )
@@ -415,7 +439,9 @@ def train(
                     )
                 scaler.step(optimizer)
                 scaler.update()
-                skipped = bool(config.amp and scaler.get_scale() < scale_before)
+                skipped = bool(
+                    config.uses_grad_scaler and scaler.get_scale() < scale_before
+                )
                 with torch.no_grad():
                     _add_epoch_sum(sums, "optimizer_steps", 1)
                     _add_epoch_sum(sums, "optimizer_steps_skipped", int(skipped))

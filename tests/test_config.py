@@ -38,6 +38,44 @@ def test_performance_logging_is_diagnostic_not_recipe(tmp_path):
     assert regular.recipe_fingerprint == profiled.recipe_fingerprint
 
 
+def test_inactive_amp_dtype_does_not_change_fp32_recipe(tmp_path):
+    fp16_setting = make_config(tmp_path, amp=False, amp_dtype="float16")
+    bf16_setting = make_config(tmp_path, amp=False, amp_dtype="bfloat16")
+
+    assert fp16_setting.precision == "float32"
+    assert fp16_setting.recipe_fingerprint == bf16_setting.recipe_fingerprint
+
+
+def test_amp_dtype_changes_mixed_precision_recipe(tmp_path):
+    fp16 = make_config(tmp_path, amp=True, amp_dtype="float16")
+    bf16 = make_config(tmp_path, amp=True, amp_dtype="bfloat16")
+
+    assert fp16.precision == "float16"
+    assert fp16.uses_grad_scaler is True
+    assert bf16.precision == "bfloat16"
+    assert bf16.uses_grad_scaler is False
+    assert fp16.recipe_fingerprint != bf16.recipe_fingerprint
+
+
+def test_run_name_isolates_outputs_without_changing_recipe(tmp_path):
+    regular = make_config(tmp_path)
+    isolated = make_config(tmp_path, run_name="fp16_batch4_global32")
+
+    assert isolated.run_dir == regular.run_dir / "fp16_batch4_global32"
+    assert isolated.recipe_fingerprint == regular.recipe_fingerprint
+
+
+@pytest.mark.parametrize("run_name", ["../escape", "has space", "", "-leading"])
+def test_run_name_rejects_unsafe_paths(tmp_path, run_name):
+    with pytest.raises(ValueError, match="run_name"):
+        make_config(tmp_path, run_name=run_name)
+
+
+def test_amp_dtype_is_validated(tmp_path):
+    with pytest.raises(ValueError, match="amp_dtype"):
+        make_config(tmp_path, amp=True, amp_dtype="float8")
+
+
 @pytest.mark.parametrize(
     ("method", "uses_auxiliary", "uses_adapter", "uses_projection"),
     [

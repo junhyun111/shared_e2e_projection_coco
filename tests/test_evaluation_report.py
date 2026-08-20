@@ -28,6 +28,7 @@ def test_official_report_writes_json_and_png(tmp_path: Path):
     assert saved["observed_percent"]["AP"] == report["observed_percent"]["AP"]
     assert saved["delta_points"]["AP"] == 0.0
     assert saved["ap_within_0_5_points"] is True
+    assert saved["inference_precision"] == "fp32"
     with Image.open(png_path) as image:
         assert image.format == "PNG"
         assert image.size == (1700, 1240)

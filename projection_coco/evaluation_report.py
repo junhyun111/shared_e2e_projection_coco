@@ -200,6 +200,7 @@ def write_official_evaluation_report(
     num_images: int,
     world_size: int,
     batch_size: int,
+    inference_precision: str = "fp32",
 ) -> tuple[Path, Path, dict]:
     missing = [key for key, _ in COCO_METRICS if key not in metrics]
     if missing:
@@ -215,7 +216,7 @@ def write_official_evaluation_report(
     delta = {label: observed[label] - reference[label] for _, label in COCO_METRICS}
     checkpoint_path = checkpoint_path.resolve()
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "evaluation": "COCO 2017 val bbox / pycocotools COCOeval",
         "model_config": {
@@ -232,6 +233,7 @@ def write_official_evaluation_report(
         "num_images": num_images,
         "world_size": world_size,
         "batch_size": batch_size,
+        "inference_precision": inference_precision,
         "val_seconds": float(metrics.get("val_seconds", 0.0)),
         "observed_percent": observed,
         "official_reference_percent": reference,
