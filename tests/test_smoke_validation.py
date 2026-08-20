@@ -71,9 +71,18 @@ def test_smoke_validator_rejects_nonfinite_projection_stat():
         validate_projected_amp_smoke_checkpoint(checkpoint)
 
 
-def test_smoke_validator_rejects_skipped_optimizer_step():
+def test_smoke_validator_accepts_partially_skipped_optimizer_steps():
     checkpoint = make_checkpoint()
     checkpoint["history"][0]["optimizer_step_skip_rate"] = 0.5
 
-    with pytest.raises(ValueError, match="skipped"):
+    report = validate_projected_amp_smoke_checkpoint(checkpoint)
+
+    assert report["optimizer_step_skip_rate"] == 0.5
+
+
+def test_smoke_validator_rejects_all_skipped_optimizer_steps():
+    checkpoint = make_checkpoint()
+    checkpoint["history"][0]["optimizer_step_skip_rate"] = 1.0
+
+    with pytest.raises(ValueError, match="All optimizer steps were skipped"):
         validate_projected_amp_smoke_checkpoint(checkpoint)

@@ -77,8 +77,9 @@ def validate_projected_amp_smoke_checkpoint(
     _require_finite(final_row, HISTORY_FINITE_KEYS, "history")
     if int(final_row.get("optimizer_steps", 0)) <= 0:
         raise ValueError("Smoke run performed no optimizer steps")
-    if float(final_row.get("optimizer_step_skip_rate", 1.0)) != 0.0:
-        raise ValueError("Smoke run skipped an optimizer step")
+    skip_rate = float(final_row.get("optimizer_step_skip_rate", 1.0))
+    if skip_rate >= 1.0:
+        raise ValueError("All optimizer steps were skipped")
 
     gradients = checkpoint.get("gradients")
     if not isinstance(gradients, list) or not gradients:

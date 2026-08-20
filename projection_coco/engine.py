@@ -65,6 +65,19 @@ def _stats_are_finite(stats: dict[str, torch.Tensor]) -> torch.Tensor:
     return torch.stack(finite).all()
 
 
+def _gradient_norm(parameters) -> torch.Tensor:
+    grads = [
+        parameter.grad.detach()
+        for parameter in parameters
+        if parameter.grad is not None
+    ]
+    if not grads:
+        raise RuntimeError("No gradients were produced")
+
+    norms = [torch.linalg.vector_norm(grad.float()) for grad in grads]
+    return torch.linalg.vector_norm(torch.stack(norms))
+
+
 def _full_windows(loader, size: int):
     data_start = time.perf_counter()
     iterator = iter(loader)
@@ -471,17 +484,39 @@ def train(
                     micro_step += 1
 
                 scaler.unscale_(optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    base_model.parameters(), config.grad_clip
-                )
-                window_finite.logical_and_(torch.isfinite(grad_norm.detach()))
+
+                # Loss/projection statistics being non-finite is a real
+                # numerical error, unlike an FP16 gradient overflow.
                 if not context.all_true(window_finite):
                     raise FloatingPointError(
-                        f"Non-finite loss, projection statistic, or gradient at epoch={epoch} "
+                        f"Non-finite loss or projection statistic at epoch={epoch} "
                         f"step={optimizer_step}"
                     )
-                scaler.step(optimizer)
-                scaler.update()
+
+                grad_norm = _gradient_norm(base_model.parameters())
+                grad_is_finite_all_ranks = context.all_true(
+                    torch.isfinite(grad_norm.detach())
+                )
+
+                if grad_is_finite_all_ranks:
+                    torch.nn.utils.clip_grad_norm_(
+                        base_model.parameters(), config.grad_clip
+                    )
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    if not config.uses_grad_scaler:
+                        raise FloatingPointError(
+                            f"Non-finite gradient at epoch={epoch} "
+                            f"step={optimizer_step}"
+                        )
+
+                    # FP16 overflow: do not clip Inf gradients. GradScaler
+                    # records found_inf in unscale_(), so step() skips the
+                    # optimizer update and update() reduces the scale.
+                    scaler.step(optimizer)
+                    scaler.update()
+
                 skipped = bool(
                     config.uses_grad_scaler and scaler.get_scale() < scale_before
                 )

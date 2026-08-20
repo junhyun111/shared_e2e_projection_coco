@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from projection_coco.config import TrainConfig
-from projection_coco.engine import _stats_are_finite, train
+from projection_coco.engine import _gradient_norm, _stats_are_finite, train
 
 
 def make_config(tmp_path: Path) -> TrainConfig:
@@ -23,6 +23,17 @@ def test_projection_stat_finite_check_rejects_nan():
     }
 
     assert not bool(_stats_are_finite(stats))
+
+
+def test_gradient_norm_is_computed_in_float32():
+    parameter = torch.nn.Parameter(torch.zeros(1, dtype=torch.float16))
+    parameter.grad = torch.tensor([65504.0], dtype=torch.float16)
+
+    norm = _gradient_norm([parameter])
+
+    assert norm.dtype == torch.float32
+    assert torch.isfinite(norm)
+    assert norm.item() == 65504.0
 
 
 def test_new_run_refuses_to_overwrite_existing_history(tmp_path):
